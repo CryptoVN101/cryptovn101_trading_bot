@@ -13,7 +13,7 @@ from trading_logic import (
 )
 
 # --- CẤU HÌNH BACKTEST ---
-SYMBOLS_TO_TEST = ["ETHUSDT", "BTCUSDT", "EIGENUSDT"]
+SYMBOLS_TO_TEST = ["ARBUSDT"]
 CANDLE_LIMIT = 1500
 
 # --- HÀM IN TÍN HIỆU (CẬP NHẬT FORMAT) ---
