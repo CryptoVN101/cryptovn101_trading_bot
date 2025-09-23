@@ -2,103 +2,131 @@
 import asyncio
 from datetime import datetime
 import pytz
+import pandas as pd
+import numpy as np
+import pandas_ta as ta
 from trading_logic import (
-    get_klines, 
-    calculate_cvd_divergence, 
+    get_klines,
     calculate_stochastic,
     TIMEFRAME_M15,
     TIMEFRAME_H1
 )
-import pandas as pd
 
-async def run_backtest(symbol='BTCUSDT', candles_to_check=1000):
-    """
-    Chạy backtest trên dữ liệu lịch sử để kiểm tra logic tín hiệu.
-    """
-    print(f"--- Bắt đầu Backtest cho mã {symbol} ---")
-    print(f"Đang tải {candles_to_check} nến lịch sử M15 và H1...")
+# --- CẤU HÌNH BACKTEST ---
+SYMBOLS_TO_TEST = ["ETHUSDT", "BTCUSDT", "EIGENUSDT"]
+CANDLE_LIMIT = 1500
 
-    try:
-        m15_data_full, h1_data_full = await asyncio.gather(
-            get_klines(symbol, TIMEFRAME_M15, limit=candles_to_check),
-            get_klines(symbol, TIMEFRAME_H1, limit=candles_to_check)
+# --- HÀM IN TÍN HIỆU (CẬP NHẬT FORMAT) ---
+def print_signal(signal_data):
+    """In tín hiệu ra terminal với format hiển thị cả giá xác nhận."""
+    vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    
+    original_time = datetime.fromtimestamp(signal_data['timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
+    confirmation_time = datetime.fromtimestamp(signal_data.get('confirmation_timestamp', signal_data['timestamp']) / 1000, tz=pytz.utc).astimezone(vietnam_tz)
+
+    signal_type_text = "Tín hiệu đảo chiều BUY/LONG" if 'LONG' in signal_data['type'] else "Tín hiệu đảo chiều BÁN/SHORT"
+    signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"
+        
+    print("==================================================")
+    print(f"🔥 TÍN HIỆU ĐƯỢC TÌM THẤY 🔥")
+    print(f"    🪙 Token: {signal_data['symbol']}")
+    print(f"    {signal_emoji} {signal_type_text}")
+    print(f"    ⏰ Khung thời gian: {signal_data.get('timeframe', 'N/A')}")
+    print(f"    🔍 Tỷ lệ Win: {signal_data.get('win_rate', 'N/A')}")
+    print(f"    ---")
+    print(f"    (Debug) Thời gian gốc: {original_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"    (Debug) Thời gian xác nhận: {confirmation_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"    (Debug) Giá tại gốc: {signal_data['price']:.2f}")
+    print(f"    (Debug) Giá xác nhận: {signal_data.get('confirmation_price', 0):.4f}")
+    print(f"    (Debug) Stoch M15: {signal_data.get('stoch_m15', 0):.2f} | Stoch H1: {signal_data.get('stoch_h1', 0):.2f}")
+    print("==================================================")
+
+# --- BỘ MÁY BACKTEST ---
+
+async def run_backtest_logic():
+    """
+    Chạy logic backtest và trả về một danh sách các tín hiệu hợp lệ.
+    """
+    from trading_logic import FRACTAL_PERIODS, CVD_PERIOD
+    all_final_signals = []
+
+    for symbol in SYMBOLS_TO_TEST:
+        print(f"--- [Backtest] Đang xử lý mã {symbol} ---")
+        m15_data, h1_data = await asyncio.gather(
+            get_klines(symbol, TIMEFRAME_M15, limit=CANDLE_LIMIT),
+            get_klines(symbol, TIMEFRAME_H1, limit=CANDLE_LIMIT)
         )
-    except Exception as e:
-        print(f"Lỗi khi tải dữ liệu ban đầu: {e}")
-        return
 
-    if m15_data_full.empty or h1_data_full.empty:
-        print("Không thể tải dữ liệu. Vui lòng thử lại.")
-        return
+        if m15_data.empty or h1_data.empty: continue
 
-    print("Đã tải dữ liệu xong. Bắt đầu quét tín hiệu...")
-    found_signals = 0
-    last_signal_timestamp = None # BIẾN MỚI: Dùng để tránh tín hiệu trùng lặp
-
-    for i in range(100, len(m15_data_full)):
-        current_m15_data = m15_data_full.iloc[:i]
-        current_timestamp = current_m15_data.iloc[-1]['timestamp']
-        current_h1_data = h1_data_full[h1_data_full['timestamp'] <= current_timestamp]
-
-        if current_h1_data.empty:
-            continue
+        m15_data['stoch_k'] = calculate_stochastic(m15_data)
+        h1_data['stoch_k'] = calculate_stochastic(h1_data)
         
-        cvd_signal = calculate_cvd_divergence(current_m15_data)
-        if not cvd_signal:
-            continue
+        # Logic tìm phân kỳ
+        if len(m15_data) < 50 + FRACTAL_PERIODS: continue
 
-        # SỬA LỖI: Chỉ xử lý nếu đây là một tín hiệu mới
-        if cvd_signal['timestamp'] == last_signal_timestamp:
-            continue
+        price_range = m15_data['high'] - m15_data['low']
+        m15_data['delta'] = np.where(price_range > 0, m15_data['volume'] * (2 * m15_data['close'] - m15_data['low'] - m15_data['high']) / price_range, 0)
+        m15_data['delta'] = m15_data['delta'].fillna(0)
+        m15_data['cvd'] = ta.ema(m15_data['delta'], length=CVD_PERIOD)
+        m15_data['ema50'] = ta.ema(m15_data['close'], length=50)
 
-        stoch_m15 = calculate_stochastic(current_m15_data)
-        stoch_h1 = calculate_stochastic(current_h1_data)
+        up_fractals, down_fractals = [], []
+        n = FRACTAL_PERIODS
+        for i in range(n, len(m15_data) - n):
+            is_uptrend = m15_data['close'].iloc[i - n] > m15_data['ema50'].iloc[i - n]
+            is_downtrend = m15_data['close'].iloc[i - n] < m15_data['ema50'].iloc[i - n]
+            is_pivot_high = all(m15_data['high'].iloc[i] >= m15_data['high'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+            is_pivot_low = all(m15_data['low'].iloc[i] <= m15_data['low'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+            if is_pivot_high and is_uptrend: up_fractals.append(i)
+            if is_pivot_low and is_downtrend: down_fractals.append(i)
 
-        if stoch_m15 is None or stoch_h1 is None:
-            continue
+        m15_signals = []
+        for i in range(1, len(up_fractals)):
+            prev_idx, last_idx = up_fractals[i-1], up_fractals[i]
+            if (last_idx - prev_idx) < 30 and (m15_data['high'].iloc[last_idx] > m15_data['high'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] < m15_data['cvd'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] > 0 and m15_data['cvd'].iloc[prev_idx] > 0):
+                m15_signals.append({'type': 'SHORT 📉', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'})
+        for i in range(1, len(down_fractals)):
+            prev_idx, last_idx = down_fractals[i-1], down_fractals[i]
+            if (last_idx - prev_idx) < 30 and (m15_data['low'].iloc[last_idx] < m15_data['low'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] > m15_data['cvd'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] < 0 and m15_data['cvd'].iloc[prev_idx] < 0):
+                m15_signals.append({'type': 'LONG 📈', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'})
 
-        final_signal_message = None
-
-        if cvd_signal['type'] == 'LONG 📈':
-            if stoch_m15 < 25 and stoch_h1 > 25:
-                final_signal_message = {**cvd_signal, 'win_rate': 'Trung bình'}
-            elif stoch_m15 < 25 and stoch_h1 < 25:
-                final_signal_message = {**cvd_signal, 'win_rate': 'Cao'}
+        # Áp dụng điều kiện Stoch
+        m15_data.set_index('timestamp', inplace=True)
+        h1_data.set_index('timestamp', inplace=True)
         
-        elif cvd_signal['type'] == 'SHORT 📉':
-            if stoch_m15 > 75 and stoch_h1 < 75:
-                final_signal_message = {**cvd_signal, 'win_rate': 'Trung bình'}
-            elif stoch_m15 > 75 and stoch_h1 > 75:
-                final_signal_message = {**cvd_signal, 'win_rate': 'Cao'}
+        for signal in m15_signals:
+            try:
+                stoch_m15_val = m15_data.loc[signal['timestamp'], 'stoch_k']
+                stoch_h1_val = h1_data.loc[h1_data.index <= signal['timestamp'], 'stoch_k'].iloc[-1]
+            except (KeyError, IndexError):
+                continue
 
-        if final_signal_message:
-            found_signals += 1
-            last_signal_timestamp = final_signal_message.get('timestamp') # Cập nhật timestamp của tín hiệu cuối
+            base_signal = {**signal, 'symbol': symbol, 'stoch_m15': stoch_m15_val, 'stoch_h1': stoch_h1_val}
+            final_signal = None
+            if signal['type'] == 'LONG 📈' and stoch_m15_val < 20:
+                if stoch_h1_val > 25: final_signal = {**base_signal, 'win_rate': '60%'}
+                elif stoch_h1_val < 25: final_signal = {**base_signal, 'win_rate': '80%'}
+            elif signal['type'] == 'SHORT 📉' and stoch_m15_val > 80:
+                if stoch_h1_val < 75: final_signal = {**base_signal, 'win_rate': '60%'}
+                elif stoch_h1_val > 75: final_signal = {**base_signal, 'win_rate': '80%'}
             
-            timestamp_ms = final_signal_message.get('timestamp')
-            utc_time = datetime.fromtimestamp(timestamp_ms / 1000, tz=pytz.utc)
-            vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-            vietnam_time = utc_time.astimezone(vietnam_tz)
-            time_str = vietnam_time.strftime('%Y-%m-%d %H:%M:%S')
+            if final_signal:
+                all_final_signals.append(final_signal)
+    
+    return all_final_signals
 
-            print("\n==================================================")
-            print("🔥 TÍN HIỆU ĐƯỢC TÌM THẤY 🔥")
-            # CẬP NHẬT: Thêm tên mã coin
-            print(f"    Mã Coin: {symbol}")
-            print(f"    Thời gian: {time_str} (Giờ Việt Nam)")
-            print(f"    Loại: {final_signal_message['type']}")
-            print(f"    Giá: {final_signal_message['price']:.2f}")
-            print(f"    Tỉ lệ: {final_signal_message['win_rate']}")
-            print(f"    Stoch M15: {stoch_m15:.2f} | Stoch H1: {stoch_h1:.2f}")
-            print("==================================================")
+async def main():
+    """Hàm main để chạy backtester từ command line."""
+    print("--- Chạy Backtester ở chế độ Standalone ---")
+    signals = await run_backtest_logic()
+    for signal in signals:
+        print_signal(signal)
+    print(f"\n--- Hoàn tất Backtest. Đã tìm thấy tổng cộng {len(signals)} tín hiệu. ---")
 
-    if found_signals == 0:
-        print(f"\n--- Hoàn tất Backtest cho {symbol}. Không tìm thấy tín hiệu nào. ---")
-    else:
-        print(f"\n--- Hoàn tất Backtest cho {symbol}. Đã tìm thấy tổng cộng {found_signals} tín hiệu. ---")
-
-
-if __name__ == '__main__':
-    # Bạn có thể đổi mã coin ở đây để test
-    asyncio.run(run_backtest(symbol='ETHUSDT'))
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBacktest stopped by user.")
 

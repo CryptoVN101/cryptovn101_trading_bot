@@ -1,11 +1,11 @@
-
+#Các thư viện cho Telegram Bot
 python-telegram-bot
 python-dotenv
+pytz
 
-python-binance
+#Các thư viện cho logic trade
 pandas
 numpy
-
+python-binance
 pandas-ta
-
-pytz
+scipy # Thư viện mới để phân tích tín hiệu
