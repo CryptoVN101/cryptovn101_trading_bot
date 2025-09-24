@@ -5,8 +5,8 @@ import pytz
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-# Sửa lại câu lệnh import cho đúng với thư viện python-binance
-from binance.client import AsyncClient 
+# Sửa lại câu lệnh import cho đúng với cấu trúc thư viện mới
+from binance.async_client import AsyncClient 
 from binance.exceptions import BinanceAPIException
 
 # --- CẤU HÌNH ---
@@ -55,7 +55,6 @@ async def get_klines(symbol, interval, limit=300):
 
 
 # --- LOGIC TÍNH TOÁN (KHÔNG ĐỔI) ---
-# ... (Toàn bộ phần logic tính toán còn lại không cần thay đổi)
 def calculate_cvd_divergence(df):
     if len(df) < 50 + FRACTAL_PERIODS: return None
     n = FRACTAL_PERIODS
