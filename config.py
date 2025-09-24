@@ -11,10 +11,18 @@ CHAT_ID = os.getenv("CHAT_ID")
 CHANNEL_ID = os.getenv("CHANNEL_ID") 
 
 # Lấy URL của database từ biến môi trường
-# Railway sẽ tự động cung cấp biến này khi bạn thêm database
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Kiểm tra các biến quan trọng
-if not TELEGRAM_TOKEN or not CHANNEL_ID or not DATABASE_URL:
-    raise ValueError("Vui lòng kiểm tra lại các biến môi trường cần thiết!")
+# --- KIỂM TRA BIẾN MÔI TRƯỜNG MỘT CÁCH CHI TIẾT ---
+missing_vars = []
+if not TELEGRAM_TOKEN:
+    missing_vars.append("TELEGRAM_TOKEN")
+if not CHANNEL_ID:
+    missing_vars.append("CHANNEL_ID")
+if not DATABASE_URL:
+    missing_vars.append("DATABASE_URL")
+
+if missing_vars:
+    # Báo lỗi chi tiết, chỉ rõ biến nào đang thiếu
+    raise ValueError(f"LỖI: Thiếu các biến môi trường sau: {', '.join(missing_vars)}. Vui lòng thêm chúng trong tab 'Variables' trên Railway.")
 
