@@ -1,7 +1,6 @@
 # main.py
 import asyncio
 import logging
-import os
 from telegram.ext import Application, CommandHandler
 from config import TELEGRAM_TOKEN
 from bot_handler import (
@@ -9,9 +8,10 @@ from bot_handler import (
     remove_symbol, 
     list_symbols, 
     start, 
-    backtest_command # Import lệnh mới
+    backtest_command
 )
 from trading_logic import run_signal_checker
+from database import init_db # Import hàm khởi tạo DB
 
 # Cấu hình logging
 logging.basicConfig(
@@ -19,42 +19,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Đảm bảo file watchlist tồn tại
-def ensure_watchlist_file():
-    if not os.path.exists("watchlist.txt"):
-        with open("watchlist.txt", "w") as f:
-            f.write("BTCUSDT\n")
-            f.write("ETHUSDT\n")
-        print("Created watchlist.txt file.")
-
 async def main() -> None:
     """Khởi động bot và bộ máy phân tích tín hiệu."""
-    ensure_watchlist_file()
-
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN không được tìm thấy! Vui lòng kiểm tra file .env.")
-        return
+    
+    # Khởi tạo database trước khi làm mọi thứ khác
+    await init_db()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Đăng ký các lệnh quản lý watchlist
+    # Đăng ký các lệnh
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("add", add_symbol))
     application.add_handler(CommandHandler("remove", remove_symbol))
     application.add_handler(CommandHandler("list", list_symbols))
-    
-    # Đăng ký các lệnh cơ bản và lệnh backtest
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("backtest", backtest_command)) # Đăng ký lệnh mới
+    application.add_handler(CommandHandler("backtest", backtest_command))
     
     # Tích hợp chạy song song
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
 
-    # Chạy bộ máy phân tích tín hiệu với đối tượng bot
+    # Chạy bộ máy phân tích tín hiệu
     await run_signal_checker(application.bot)
 
-    # Dừng bot một cách an toàn
+    # Dừng bot
     await application.updater.stop()
     await application.stop()
 
