@@ -3,7 +3,9 @@ python-dotenv
 pandas
 numpy
 pandas-ta
-binance-connector
+
+#Thay thế thư viện cũ bằng thư viện đúng
+python-binance
 pytz
 scipy
-asyncpg # Thư viện mới cho PostgreSQL
+asyncpg
