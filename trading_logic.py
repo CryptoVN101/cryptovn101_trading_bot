@@ -5,23 +5,24 @@ import pytz
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-# Sửa lại câu lệnh import cho đúng với cấu trúc thư viện mới
 from binance.async_client import AsyncClient 
 from binance.exceptions import BinanceAPIException
 
 # --- CẤU HÌNH ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
 TIMEFRAME_H1 = AsyncClient.KLINE_INTERVAL_1HOUR
-FRACTAL_PERIODS = 4
+# SỬA LẠI THÔNG SỐ THEO YÊU CẦU
+FRACTAL_PERIODS = 2 
 CVD_PERIOD = 24
 STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
 
-# --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
+# Biến global để lưu trữ "trí nhớ" của bot
+last_sent_signals = {}
 
+# --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
 async def get_klines(symbol, interval, limit=300):
-    """Lấy dữ liệu nến từ Binance, ưu tiên Futures và dự phòng Spot."""
     client = None
     try:
         client = await AsyncClient.create()
@@ -52,7 +53,6 @@ async def get_klines(symbol, interval, limit=300):
     finally:
         if client:
             await client.close_connection()
-
 
 # --- LOGIC TÍNH TOÁN (KHÔNG ĐỔI) ---
 def calculate_cvd_divergence(df):
@@ -109,6 +109,8 @@ def calculate_stochastic(df):
         return stoch[f'STOCHk_{STOCH_K}_{STOCH_D}_{STOCH_SMOOTH_K}']
     return None
 
+# --- BỘ MÁY QUÉT TÍN HIỆU ---
+
 async def run_signal_checker(bot):
     print("🚀 Signal checker is running...")
     from bot_handler import get_watchlist_from_db, send_formatted_signal 
@@ -136,11 +138,7 @@ async def run_signal_checker(bot):
         for symbol in watchlist:
             print(f"   -> Scanning {symbol}...")
             try:
-                m15_data, h1_data = await asyncio.gather(
-                    get_klines(symbol, TIMEFRAME_M15),
-                    get_klines(symbol, TIMEFRAME_H1)
-                )
-
+                m15_data, h1_data = await asyncio.gather(get_klines(symbol, TIMEFRAME_M15), get_klines(symbol, TIMEFRAME_H1))
                 if m15_data.empty or h1_data.empty: continue
 
                 m15_data.set_index('timestamp', inplace=True)
@@ -153,19 +151,19 @@ async def run_signal_checker(bot):
                 stoch_h1_series = calculate_stochastic(h1_data)
                 if stoch_m15_series is None or stoch_h1_series is None: continue
                 
-                confirmation_ts = cvd_signal_m15['confirmation_timestamp']
+                confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
                 
                 try:
                     stoch_m15 = stoch_m15_series.loc[confirmation_ts]
                     stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
                     stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
-                except KeyError:
+                except (KeyError, IndexError):
                     continue
 
                 if stoch_h1 is None: continue
 
                 final_signal_message = None
-                base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15'}
+                base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
                 if cvd_signal_m15['type'] == 'LONG 📈':
                     if stoch_m15 < 20 and stoch_h1 > 25: 
                         final_signal_message = {**base_signal, 'win_rate': '60%'}
@@ -178,7 +176,13 @@ async def run_signal_checker(bot):
                         final_signal_message = {**base_signal, 'win_rate': '80%'}
 
                 if final_signal_message:
-                    await send_formatted_signal(bot, final_signal_message)
+                    signal_timestamp = final_signal_message['timestamp']
+                    if last_sent_signals.get(symbol) != signal_timestamp:
+                        await send_formatted_signal(bot, final_signal_message)
+                        last_sent_signals[symbol] = signal_timestamp
+                    else:
+                        print(f"   -> Duplicate signal for {symbol}. Skipping.")
+
 
             except Exception as e:
                 print(f"Lỗi không xác định khi xử lý mã {symbol}: {e}")
