@@ -8,12 +8,13 @@ import pandas_ta as ta
 from binance.async_client import AsyncClient 
 from binance.exceptions import BinanceAPIException
 
-# --- CẤU HÌNH ---
+# --- CẤU HÌNH MỚI CHO CHỈ BÁO ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
 TIMEFRAME_H1 = AsyncClient.KLINE_INTERVAL_1HOUR
-# SỬA LẠI THÔNG SỐ THEO YÊU CẦU
-FRACTAL_PERIODS = 2 
+FRACTAL_PERIODS = 2 # Đã cập nhật lại theo yêu cầu
 CVD_PERIOD = 24
+
+# Cấu hình Stochastic (không đổi)
 STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
@@ -54,24 +55,26 @@ async def get_klines(symbol, interval, limit=300):
         if client:
             await client.close_connection()
 
-# --- LOGIC TÍNH TOÁN (KHÔNG ĐỔI) ---
+# --- LOGIC TÍNH TOÁN CHỈ BÁO ---
 def calculate_cvd_divergence(df):
     if len(df) < 50 + FRACTAL_PERIODS: return None
     n = FRACTAL_PERIODS
     price_range = df['high'] - df['low']
     df['delta'] = np.where(price_range > 0, df['volume'] * (2 * df['close'] - df['low'] - df['high']) / price_range, 0)
     df['delta'] = df['delta'].fillna(0)
+    
     df['cvd'] = ta.ema(df['delta'], length=CVD_PERIOD)
+    
     df['ema50'] = ta.ema(df['close'], length=50)
+    
     up_fractals = []
     down_fractals = []
     for i in range(n, len(df) - n):
-        is_uptrend = df['close'].iloc[i - n] > df['ema50'].iloc[i - n]
-        is_downtrend = df['close'].iloc[i - n] < df['ema50'].iloc[i - n]
         is_pivot_high = df['high'].iloc[i] == df['high'].iloc[i-n:i+n+1].max()
         is_pivot_low = df['low'].iloc[i] == df['low'].iloc[i-n:i+n+1].min()
-        if is_pivot_high and is_uptrend: up_fractals.append(i)
-        if is_pivot_low and is_downtrend: down_fractals.append(i)
+        if is_pivot_high: up_fractals.append(i)
+        if is_pivot_low: down_fractals.append(i)
+        
     current_bar_index = len(df) - 1
     signal = None
     if len(up_fractals) >= 2:
