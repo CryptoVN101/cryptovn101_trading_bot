@@ -1,5 +1,6 @@
 # bot_handler.py
 import asyncio
+import os
 from datetime import datetime
 import pytz
 from telegram import Update
@@ -63,21 +64,31 @@ async def list_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # --- HÀM GỬI TÍN HIỆU ---
 async def send_formatted_signal(bot: Bot, signal_data: dict):
-    # ... (Nội dung hàm này không thay đổi)
+    """
+    Định dạng và gửi tín hiệu cuối cùng lên channel.
+    Bổ sung thêm thông tin Stoch để debug.
+    """
     vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     original_time = datetime.fromtimestamp(signal_data['timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
     confirmation_time = datetime.fromtimestamp(signal_data['confirmation_timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
+
     signal_type_text = "Tín hiệu đảo chiều BUY/LONG" if 'LONG' in signal_data['type'] else "Tín hiệu đảo chiều BÁN/SHORT"
     signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"
+    
+    # Lấy giá trị Stoch từ signal_data
+    stoch_m15 = signal_data.get('stoch_m15', 0.0)
+    stoch_h1 = signal_data.get('stoch_h1', 0.0)
+        
     message = (
         f"<b>🔶 Token:</b> <code>{signal_data['symbol']}</code>\n"
         f"<b>{signal_emoji} {signal_type_text}</b>\n"
         f"<b>⏰ Khung thời gian:</b> {signal_data.get('timeframe', 'N/A')}\n"
-        f"<b>💰 Giá xác nhận:</b> <code>{signal_data.get('confirmation_price', 0.0):.2f}</code>\n"
+        f"<b>💰 Giá xác nhận:</b> <code>{signal_data.get('confirmation_price', 0.0):.4f}</code>\n"
         f"<b>🔍 Tỷ lệ Win:</b> {signal_data.get('win_rate', 'N/A')}\n"
         f"---------------------------------\n"
         f"<i>Thời gian gốc: {original_time.strftime('%H:%M %d-%m-%Y')}</i>\n"
-        f"<i>Thời gian xác nhận: {confirmation_time.strftime('%H:%M %d-%m-%Y')}</i>"
+        f"<i>Thời gian xác nhận: {confirmation_time.strftime('%H:%M %d-%m-%Y')}</i>\n"
+        f"<i>Stoch (M15/H1): {stoch_m15:.2f} / {stoch_h1:.2f}</i>" # Thêm dòng Stoch
     )
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='HTML')
@@ -87,7 +98,6 @@ async def send_formatted_signal(bot: Bot, signal_data: dict):
 
 # --- LỆNH BACKTEST ---
 async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (Nội dung hàm này không thay đổi)
     await update.message.reply_text("⏳ Bắt đầu backtest...")
     try:
         found_signals = await run_backtest_logic()
