@@ -34,7 +34,7 @@ vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 active_sockets = {}
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
-async def get_klines(symbol, interval, client, max_retries=3, limit=500):  # Giảm limit để tăng tốc
+async def get_klines(symbol, interval, client, max_retries=3, limit=500):
     for attempt in range(max_retries):
         try:
             logger.info(f"Lấy {limit} nến cho {symbol} trên khung {interval} (thử lần {attempt + 1})")
@@ -234,18 +234,18 @@ async def run_signal_checker(bot_instance):
 
     watchlist = await initialize_watches()
     if watchlist:
-        asyncio.create_task(start_websocket(watchlist))
-        asyncio.create_task(watchlist_monitor(bot_instance))
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        logger.info("Task cancelled, cleaning up resources...")
-        await cleanup()
-    except Exception as e:
-        logger.error(f"Lỗi trong main loop: {e}")
-        await cleanup()
-    finally:
-        await cleanup()
+        websocket_task = asyncio.create_task(start_websocket(watchlist))
+        monitor_task = asyncio.create_task(watchlist_monitor(bot_instance))
+        try:
+            await asyncio.gather(websocket_task, monitor_task)
+        except asyncio.CancelledError:
+            logger.info("Task cancelled, cleaning up resources...")
+            await cleanup()
+        except Exception as e:
+            logger.error(f"Lỗi trong main loop: {e}")
+            await cleanup()
+        finally:
+            await cleanup()
 
 # --- HÀM ĐỊNH KỲ KIỂM TRA WATCHLIST ---
 async def watchlist_monitor(bot_instance):
