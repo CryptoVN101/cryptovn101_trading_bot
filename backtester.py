@@ -1,15 +1,16 @@
-# backtester.py
 import asyncio
 from datetime import datetime
 import pytz
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
+from binance.async_client import AsyncClient
 from trading_logic import (
-    get_klines,
     calculate_stochastic,
     TIMEFRAME_M15,
-    TIMEFRAME_H1
+    TIMEFRAME_H1,
+    FRACTAL_PERIODS,
+    CVD_PERIOD
 )
 
 # --- CẤU HÌNH BACKTEST ---
@@ -41,29 +42,37 @@ def print_signal(signal_data):
     print(f"    (Debug) Stoch M15: {signal_data.get('stoch_m15', 0):.2f} | Stoch H1: {signal_data.get('stoch_h1', 0):.2f}")
     print("==================================================")
 
-# --- BỘ MÁY BACKTEST ---
+# --- HÀM LẤY DỮ LIỆU (TẠM THỜI LẤY TỪ TRADING_LOGIC) ---
+async def get_klines_wrapper(symbol, interval, client, limit=CANDLE_LIMIT):
+    """Wrapper để gọi get_klines từ trading_logic với client."""
+    from trading_logic import get_klines
+    return await get_klines(symbol, interval, client, limit=limit)
 
-async def run_backtest_logic():
+# --- BỘ MÁY BACKTEST ---
+async def run_backtest_logic(client):
     """
     Chạy logic backtest và trả về một danh sách các tín hiệu hợp lệ.
     """
-    from trading_logic import FRACTAL_PERIODS, CVD_PERIOD
     all_final_signals = []
 
     for symbol in SYMBOLS_TO_TEST:
         print(f"--- [Backtest] Đang xử lý mã {symbol} ---")
         m15_data, h1_data = await asyncio.gather(
-            get_klines(symbol, TIMEFRAME_M15, limit=CANDLE_LIMIT),
-            get_klines(symbol, TIMEFRAME_H1, limit=CANDLE_LIMIT)
+            get_klines_wrapper(symbol, TIMEFRAME_M15, client),
+            get_klines_wrapper(symbol, TIMEFRAME_H1, client)
         )
 
-        if m15_data.empty or h1_data.empty: continue
+        if m15_data.empty or h1_data.empty:
+            print(f"--- [Backtest] Dữ liệu trống cho {symbol}, bỏ qua ---")
+            continue
 
         m15_data['stoch_k'] = calculate_stochastic(m15_data)
         h1_data['stoch_k'] = calculate_stochastic(h1_data)
         
         # Logic tìm phân kỳ
-        if len(m15_data) < 50 + FRACTAL_PERIODS: continue
+        if len(m15_data) < 50 + FRACTAL_PERIODS:
+            print(f"--- [Backtest] Dữ liệu không đủ cho {symbol}, bỏ qua ---")
+            continue
 
         price_range = m15_data['high'] - m15_data['low']
         m15_data['delta'] = np.where(price_range > 0, m15_data['volume'] * (2 * m15_data['close'] - m15_data['low'] - m15_data['high']) / price_range, 0)
@@ -116,17 +125,27 @@ async def run_backtest_logic():
     
     return all_final_signals
 
-async def main():
-    """Hàm main để chạy backtester từ command line."""
+async def main(client):
+    """Hàm main để chạy backtester từ command line hoặc bot."""
     print("--- Chạy Backtester ở chế độ Standalone ---")
-    signals = await run_backtest_logic()
+    signals = await run_backtest_logic(client)
     for signal in signals:
         print_signal(signal)
     print(f"\n--- Hoàn tất Backtest. Đã tìm thấy tổng cộng {len(signals)} tín hiệu. ---")
 
+# --- KHỞI TẠO CLIENT CHO BACKTEST ---
+async def run_backtest():
+    """Khởi tạo client và chạy backtest."""
+    client = await AsyncClient.create()
+    try:
+        await main(client)
+    finally:
+        if client and not client.session.closed:
+            await client.close_connection()
+            print("Đã đóng kết nối client.")
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(run_backtest())
     except KeyboardInterrupt:
         print("\nBacktest stopped by user.")
-
