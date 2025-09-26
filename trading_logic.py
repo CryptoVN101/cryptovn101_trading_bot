@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 handler.setFormatter(formatter)
-logger.addHandler(handler)
 vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 logger.handlers[0].formatter.converter = lambda *args: datetime.now(vietnam_tz).timetuple()
 
@@ -48,8 +47,17 @@ async def get_klines(symbol, interval, client, max_retries=3, limit=500):
                     'close_time', 'quote_asset_volume', 'number_of_trades',
                     'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
                 ])
-                for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+                
+                # <<< SỬA LỖI DTYPE: Chuyển đổi tất cả các cột numeric để đảm bảo dtype nhất quán
+                numeric_cols = [
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume'
+                ]
+                for col in numeric_cols:
                     df[col] = pd.to_numeric(df[col])
+                # >>> KẾT THÚC SỬA LỖI DTYPE
+                
                 logger.info(f"Đã lấy {len(df)} nến cho {symbol}")
                 return df
             raise ValueError("Could not retrieve klines from any market.")
@@ -61,7 +69,9 @@ async def get_klines(symbol, interval, client, max_retries=3, limit=500):
                 return pd.DataFrame()
     return pd.DataFrame()
 
+
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
+# ... (Phần còn lại của file giữ nguyên như phiên bản trước)
 def calculate_cvd_divergence(df, symbol):
     if len(df) < 50 + FRACTAL_PERIODS:
         return None
@@ -133,15 +143,25 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_ins
         'low': float(kline_data['l']), 'close': float(kline_data['c']), 'volume': float(kline_data['v']),
         'close_time': kline_data['T'], 'quote_asset_volume': float(kline_data['q']),
         'number_of_trades': kline_data['n'], 'taker_buy_base_asset_volume': float(kline_data['V']),
-        'taker_buy_quote_asset_volume': float(kline_data['Q']), 'ignore': 0
+        'taker_buy_quote_asset_volume': float(kline_data['Q']), 'ignore': '0'
     }
     
     df_to_update = klines_cache[symbol]['m15'] if interval == TIMEFRAME_M15 else klines_cache[symbol]['h1']
     
     if df_to_update.empty or new_candle['timestamp'] > df_to_update.iloc[-1]['timestamp']:
-        df_to_update = pd.concat([df_to_update, pd.DataFrame([new_candle])], ignore_index=True).tail(1000)
+        # Tạo DataFrame từ new_candle với dtypes rõ ràng để tránh lỗi
+        new_df_row = pd.DataFrame([new_candle])
+        # Đảm bảo dtypes của new_df_row khớp với df_to_update nếu df_to_update không rỗng
+        if not df_to_update.empty:
+            new_df_row = new_df_row.astype(df_to_update.dtypes.to_dict())
+        df_to_update = pd.concat([df_to_update, new_df_row], ignore_index=True).tail(1000)
+
     else:
-        df_to_update.iloc[-1] = new_candle
+        # Cập nhật dòng cuối cùng
+        for key, value in new_candle.items():
+            if key in df_to_update.columns:
+                 df_to_update.iloc[-1, df_to_update.columns.get_loc(key)] = value
+
 
     if interval == TIMEFRAME_M15:
         klines_cache[symbol]['m15'] = df_to_update
@@ -161,10 +181,8 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_ins
             stoch_h1 = calculate_stochastic(h1_df)
             
             if stoch_m15 is not None and stoch_h1 is not None:
-                # <<< SỬA LỖI: Sử dụng timestamp của pivot, không phải của nến xác nhận
                 pivot_ts = pd.to_datetime(cvd_signal['timestamp'], unit='ms')
                 
-                # <<< SỬA LỖI: Tra cứu giá trị Stoch tại thời điểm PIVOT
                 stoch_m15_value = stoch_m15[stoch_m15.index <= pivot_ts].iloc[-1] if not stoch_m15[stoch_m15.index <= pivot_ts].empty else None
                 stoch_h1_value = stoch_h1[stoch_h1.index <= pivot_ts].iloc[-1] if not stoch_h1[stoch_h1.index <= pivot_ts].empty else None
                 
@@ -188,6 +206,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_ins
 
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
+# (Giữ nguyên không đổi)
 async def run_signal_checker(bot_instance):
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -215,17 +234,12 @@ async def run_signal_checker(bot_instance):
         async def handle_kline_socket(symbol, interval):
             while True:
                 try:
-                    # Chuyển sang kline_socket (cho cả Spot và Futures) để linh hoạt hơn
                     async with bsm.kline_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
                         active_sockets[(symbol, interval)] = kline_socket
                         logger.debug(f"WebSocket connected for {symbol} ({interval})")
                         while True:
                             kline = await kline_socket.recv()
-                            # Chỉ xử lý data M15 để tránh xử lý trùng lặp
-                            if interval == TIMEFRAME_M15:
-                                await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'], bot_instance)
-                            else: # Với H1 chỉ cần cập nhật cache
-                                await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'], bot_instance)
+                            await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'], bot_instance)
                             await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
@@ -246,9 +260,6 @@ async def run_signal_checker(bot_instance):
     try:
         watchlist = await initialize_watches()
         if watchlist:
-            # Tạm thời vô hiệu hóa watchlist_monitor để tránh reload không cần thiết
-            # Bạn có thể bật lại sau khi đã tái cấu trúc nó để chỉ thêm/xóa stream cần thiết
-            # monitor_task = asyncio.create_task(watchlist_monitor(bot_instance))
             await start_websocket(watchlist)
     except asyncio.CancelledError:
         logger.info("Task cancelled, cleaning up resources...")
@@ -256,14 +267,3 @@ async def run_signal_checker(bot_instance):
         logger.error(f"Lỗi trong main loop của run_signal_checker: {e}")
     finally:
         await cleanup()
-
-# Tạm thời vô hiệu hóa hàm này để tránh reload toàn bộ WebSocket mỗi 5 phút
-# async def watchlist_monitor(bot_instance):
-#     while True:
-#         try:
-#             from bot_handler import reload_signal_checker
-#             await reload_signal_checker(bot_instance)
-#             await asyncio.sleep(300) 
-#         except Exception as e:
-#             logger.error(f"Lỗi trong watchlist_monitor: {e}")
-#             await asyncio.sleep(5)
