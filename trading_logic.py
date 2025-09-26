@@ -148,7 +148,6 @@ def calculate_stochastic(df):
 # --- XỬ LÝ DỮ LIỆU WEBSOCKET ---
 async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
     timestamp = datetime.fromtimestamp(kline['k']['t'] / 1000, vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')
-    logger.info(f"Nhận nến mới cho {symbol} trên khung {interval} tại {timestamp}")
     kline_data = kline['k']
     new_candle = {
         'timestamp': kline_data['t'],
@@ -183,11 +182,12 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         klines_cache[symbol]['m15'] = df
     else:
         klines_cache[symbol]['h1'] = df
+    
+    # Chỉ ghi log khi nến đóng
     if kline_data['x']:
+        logger.info(f"Nhận nến mới và xử lý cho {symbol} trên khung {interval} tại {timestamp}")
         logger.info(f"Cập nhật cache cho {symbol}: M15={len(klines_cache[symbol]['m15'])}, H1={len(klines_cache[symbol]['h1'])} nến")
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
-    else:
-        logger.info(f"Nến {symbol} trên khung {interval} chưa đóng, chỉ nhận dữ liệu realtime")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
 async def run_signal_checker(bot):
