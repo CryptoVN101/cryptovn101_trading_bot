@@ -12,7 +12,7 @@ from database import (
     add_symbols_to_db, 
     remove_symbols_from_db
 )
-from trading_logic import run_signal_checker  # Import để khởi động lại WebSocket
+from trading_logic import run_signal_checker
 
 # Cấu hình logging
 import logging
@@ -25,14 +25,12 @@ application = Application.builder().token(BOT_TOKEN).build()
 bot = Bot(BOT_TOKEN)
 
 # Hàm reload watchlist và restart WebSocket
-async def reload_signal_checker(context: ContextTypes.DEFAULT_TYPE):
+async def reload_signal_checker(bot_instance):  # Thay context bằng bot_instance
     logger.info("Bắt đầu reload watchlist...")
-    # Dừng các socket cũ (giả sử trading_logic có active_sockets)
-    # Lưu ý: Cần đảm bảo trading_logic hỗ trợ restart dynamic
     global watchlist_task
     if 'watchlist_task' in globals() and not watchlist_task.done():
         watchlist_task.cancel()
-    watchlist_task = asyncio.create_task(run_signal_checker(context.bot))
+    watchlist_task = asyncio.create_task(run_signal_checker(bot_instance))
     logger.info("WebSocket đã được khởi động lại với watchlist mới.")
 
 # Handler cho /start
@@ -54,7 +52,7 @@ async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if symbols_to_add:
         await add_symbols_to_db(symbols_to_add)
         await update.message.reply_text(f"Đã thêm thành công: {', '.join(symbols_to_add)}")
-        await reload_signal_checker(context)  # Reload watchlist và khởi động WebSocket
+        await reload_signal_checker(context.bot)  # Sử dụng context.bot
     else:
         await update.message.reply_text("Các mã coin này đã có trong danh sách.")
 
@@ -74,7 +72,7 @@ async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not_found_symbols:
             message += f"\nKhông tìm thấy: {', '.join(not_found_symbols)}"
         await update.message.reply_text(message)
-        await reload_signal_checker(context)  # Reload watchlist và khởi động WebSocket
+        await reload_signal_checker(context.bot)  # Sử dụng context.bot
     else:
         await update.message.reply_text("Không tìm thấy các mã coin này trong danh sách.")
 
@@ -140,7 +138,7 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("✅ Backtest hoàn tất.")
     except Exception as e:
         logger.error(f"Lỗi backtest: {e}")
-        await update.message.reply_text(f" Rất tiếc, đã có lỗi: {e}")
+        await update.message.reply_text(f"Rất tiếc, đã có lỗi: {e}")
 
 # Đăng ký các handler
 def main():
@@ -157,5 +155,5 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
-    from telegram.ext import CommandHandler  # Import tại đây để tránh vòng lặp
+    from telegram.ext import CommandHandler
     main()

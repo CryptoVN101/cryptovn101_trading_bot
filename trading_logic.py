@@ -36,7 +36,7 @@ vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 active_sockets = {}  # Lưu trữ các socket WebSocket để đóng khi cần
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
-async def get_klines(symbol, interval, limit=1000):  # Thay đổi limit từ 1500 thành 1000
+async def get_klines(symbol, interval, limit=1000):
     client = None
     try:
         client = await AsyncClient.create()
@@ -73,7 +73,7 @@ async def get_klines(symbol, interval, limit=1000):  # Thay đổi limit từ 15
             await client.close_connection()
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
-def calculate_cvd_divergence(df, symbol):  # Thêm tham số symbol để tránh undefined
+def calculate_cvd_divergence(df, symbol):
     logger.info(f"Tính CVD cho {symbol}: {len(df)} nến")
     if len(df) < 50 + FRACTAL_PERIODS:
         logger.warning(f"Không đủ dữ liệu cho {symbol}: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
@@ -180,7 +180,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         df = pd.DataFrame([new_candle])
     else:
         df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
-        df = df.tail(1000)  # Cập nhật tail thành 1000 để đồng bộ với limit
+        df = df.tail(1000)
     
     for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col])
@@ -196,7 +196,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
-async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
+async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     from bot_handler import get_watchlist_from_db, send_formatted_signal
@@ -209,8 +209,7 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
         if not watchlist:
             logger.warning("Watchlist rỗng. Đợi cập nhật watchlist...")
             return
-        # Tải dữ liệu nến theo lô để giảm tải
-        for i in range(0, len(watchlist), 5):  # Xử lý 5 symbol/lần
+        for i in range(0, len(watchlist), 5):
             batch = watchlist[i:i+5]
             tasks = []
             for symbol in batch:
@@ -227,7 +226,7 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
                     logger.error(f"Lỗi tải H1 cho {symbol}: {h1_data}")
                 else:
                     klines_cache[symbol]['h1'] = h1_data
-            await asyncio.sleep(1)  # Đợi 1 giây giữa các lô
+            await asyncio.sleep(1)
         return watchlist
 
     async def start_websocket(watchlist):
@@ -291,7 +290,6 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
             tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Khởi chạy
     watchlist = await initialize_watches()
     if watchlist:
         asyncio.create_task(start_websocket(watchlist))
@@ -310,7 +308,7 @@ async def watchlist_monitor(bot_instance):
     while True:
         try:
             from bot_handler import reload_signal_checker
-            await reload_signal_checker(bot_instance)
+            await reload_signal_checker(bot_instance)  # Truyền bot_instance trực tiếp
             await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Lỗi trong watchlist_monitor: {e}")

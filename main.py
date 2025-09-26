@@ -9,25 +9,21 @@ from bot_handler import (
     remove_symbol, 
     list_symbols, 
     start, 
-    backtest_command
+    backtest_command,
+    bot  # Import bot instance toàn cục
 )
 from trading_logic import run_signal_checker
 from database import init_db
 
 # --- CẤU HÌNH LOGGING NÂNG CAO ---
-
-# 1. Cấu hình logger gốc (cho code của chúng ta)
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
-# 2. Tạo một logger riêng cho ứng dụng của chúng ta để dễ nhận biết
 logger = logging.getLogger(__name__)
 
-# 3. Tắt các log INFO không cần thiết từ các thư viện bên ngoài
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
-
 
 async def main() -> None:
     """Khởi động bot và bộ máy phân tích tín hiệu."""
@@ -52,8 +48,8 @@ async def main() -> None:
     await application.start()
     await application.updater.start_polling()
 
-    # Chạy bộ máy phân tích tín hiệu
-    await run_signal_checker(application.bot)
+    # Chạy bộ máy phân tích tín hiệu với bot instance
+    await run_signal_checker(bot)  # Sử dụng bot instance từ bot_handler.py
 
     # Dừng bot
     await application.updater.stop()
@@ -65,4 +61,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
-
