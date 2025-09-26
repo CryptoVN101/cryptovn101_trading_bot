@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 async def post_shutdown_cleanup(application: Application):
     """
     Hàm dọn dẹp được gọi sau khi application đã dừng hoàn toàn.
-    Đây là cách làm đúng và an toàn được thư viện khuyến nghị.
     """
     logger.info("Bot is shutting down. Cleaning up background task...")
     task = application.bot_data.get("watchlist_task")
@@ -50,7 +49,11 @@ async def main() -> None:
         logger.error("TELEGRAM_TOKEN không được tìm thấy! Vui lòng kiểm tra file config.py hoặc biến môi trường.")
         return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # --- SỬA LỖI QUAN TRỌNG TẠI ĐÂY ---
+    # Chuyển .post_shutdown vào chuỗi builder
+    builder = Application.builder().token(TELEGRAM_TOKEN)
+    builder.post_shutdown(post_shutdown_cleanup)
+    application = builder.build()
     
     # Đăng ký các lệnh
     application.add_handler(CommandHandler("start", start))
@@ -64,13 +67,9 @@ async def main() -> None:
     signal_checker_task = asyncio.create_task(run_signal_checker(application.bot))
     application.bot_data["watchlist_task"] = signal_checker_task
     
-    # -- SỬA LỖI QUAN TRỌNG --
-    # Đăng ký hàm dọn dẹp để chạy sau khi bot dừng
-    application.post_shutdown(post_shutdown_cleanup)
-    
     logger.info("Signal checker task created. Starting bot polling...")
     
-    # Bỏ try...finally, để application tự quản lý vòng đời của nó
+    # Để application tự quản lý vòng đời của nó
     await application.run_polling()
 
 
