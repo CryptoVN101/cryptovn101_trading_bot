@@ -34,12 +34,14 @@ last_sent_signals = {}
 klines_cache = {}
 vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 active_sockets = {}  # Lưu trữ các socket WebSocket để đóng khi cần
+client = None  # Thêm biến global để quản lý AsyncClient
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
 async def get_klines(symbol, interval, limit=1000):
-    client = None
+    global client
     try:
-        client = await AsyncClient.create()
+        if not client or client.closed:
+            client = await AsyncClient.create()
         logger.info(f"Lấy {limit} nến cho {symbol} trên khung {interval}")
         klines = None
         try:
@@ -68,9 +70,6 @@ async def get_klines(symbol, interval, limit=1000):
     except Exception as e:
         logger.error(f"Lỗi khi lấy dữ liệu cho {symbol} trên khung {interval}: {e}")
         return pd.DataFrame()
-    finally:
-        if client:
-            await client.close_connection()
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
 def calculate_cvd_divergence(df, symbol):
@@ -196,119 +195,132 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
-async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
+async def run_signal_checker(bot_instance):
+    global client, active_sockets
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     from bot_handler import get_watchlist_from_db, send_formatted_signal
     
-    client = await AsyncClient.create()
-    bsm = BinanceSocketManager(client, max_queue_size=1000)
-    
-    async def initialize_watches():
-        watchlist = await get_watchlist_from_db()
-        if not watchlist:
-            logger.warning("Watchlist rỗng. Đợi cập nhật watchlist...")
-            return
-        for i in range(0, len(watchlist), 5):
-            batch = watchlist[i:i+5]
-            tasks = []
-            for symbol in batch:
-                klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
-                tasks.append(get_klines(symbol, TIMEFRAME_M15))
-                tasks.append(get_klines(symbol, TIMEFRAME_H1))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for symbol, (m15_data, h1_data) in zip(batch, zip(results[::2], results[1::2])):
-                if isinstance(m15_data, Exception):
-                    logger.error(f"Lỗi tải M15 cho {symbol}: {m15_data}")
-                else:
-                    klines_cache[symbol]['m15'] = m15_data
-                if isinstance(h1_data, Exception):
-                    logger.error(f"Lỗi tải H1 cho {symbol}: {h1_data}")
-                else:
-                    klines_cache[symbol]['h1'] = h1_data
-            await asyncio.sleep(1)
-        return watchlist
-
-    async def start_websocket(watchlist):
-        async def handle_kline_socket(symbol, interval):
-            while True:
-                try:
-                    async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
-                        active_sockets[(symbol, interval)] = kline_socket
-                        while True:
-                            kline = await kline_socket.recv()
-                            await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
-                            if interval == TIMEFRAME_M15 and 'k' in kline and kline['k']['x']:
-                                m15_data = klines_cache[symbol]['m15'].copy()
-                                h1_data = klines_cache[symbol]['h1'].copy()
-                                if m15_data.empty or h1_data.empty:
-                                    logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
-                                    continue
-                                m15_data.set_index('timestamp', inplace=True)
-                                h1_data.set_index('timestamp', inplace=True)
-                                cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index(), symbol)
-                                if not cvd_signal_m15:
-                                    continue
-                                stoch_m15_series = calculate_stochastic(m15_data)
-                                stoch_h1_series = calculate_stochastic(h1_data)
-                                if stoch_m15_series is None or stoch_h1_series is None:
-                                    continue
-                                confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
-                                stoch_m15 = stoch_m15_series[stoch_m15_series.index <= confirmation_ts].iloc[-1] if not stoch_m15_series[stoch_m15_series.index <= confirmation_ts].empty else None
-                                stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
-                                stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
-                                if stoch_m15 is None or stoch_h1 is None:
-                                    continue
-                                final_signal_message = None
-                                base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
-                                if cvd_signal_m15['type'] == 'LONG 📈' and stoch_m15 < 20:
-                                    if stoch_h1 > 25:
-                                        final_signal_message = {**base_signal, 'win_rate': '60%'}
-                                    elif stoch_h1 < 25:
-                                        final_signal_message = {**base_signal, 'win_rate': '80%'}
-                                elif cvd_signal_m15['type'] == 'SHORT 📉' and stoch_m15 > 80:
-                                    if stoch_h1 < 75:
-                                        final_signal_message = {**base_signal, 'win_rate': '60%'}
-                                    elif stoch_h1 > 75:
-                                        final_signal_message = {**base_signal, 'win_rate': '80%'}
-                                if final_signal_message:
-                                    signal_timestamp = final_signal_message['timestamp']
-                                    if last_sent_signals.get(symbol) != signal_timestamp:
-                                        await send_formatted_signal(bot_instance, final_signal_message)
-                                        last_sent_signals[symbol] = signal_timestamp
-                                        logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
-                                    else:
-                                        logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
-                            await asyncio.sleep(0.1)
-                except Exception as e:
-                    logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
-                    await asyncio.sleep(5)
-
-        tasks = []
-        for symbol in watchlist:
-            tasks.append(handle_kline_socket(symbol, TIMEFRAME_M15))
-            tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    watchlist = await initialize_watches()
-    if watchlist:
-        asyncio.create_task(start_websocket(watchlist))
-        asyncio.create_task(watchlist_monitor(bot_instance))
     try:
-        await asyncio.Event().wait()
-    except Exception as e:
-        logger.error(f"Lỗi trong main loop: {e}")
+        client = await AsyncClient.create()
+        bsm = BinanceSocketManager(client, max_queue_size=1000)
+        
+        async def initialize_watches():
+            watchlist = await get_watchlist_from_db()
+            if not watchlist:
+                logger.warning("Watchlist rỗng. Đợi cập nhật watchlist...")
+                return
+            for i in range(0, len(watchlist), 5):
+                batch = watchlist[i:i+5]
+                tasks = []
+                for symbol in batch:
+                    klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
+                    tasks.append(get_klines(symbol, TIMEFRAME_M15))
+                    tasks.append(get_klines(symbol, TIMEFRAME_H1))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for symbol, (m15_data, h1_data) in zip(batch, zip(results[::2], results[1::2])):
+                    if isinstance(m15_data, Exception):
+                        logger.error(f"Lỗi tải M15 cho {symbol}: {m15_data}")
+                    else:
+                        klines_cache[symbol]['m15'] = m15_data
+                    if isinstance(h1_data, Exception):
+                        logger.error(f"Lỗi tải H1 cho {symbol}: {h1_data}")
+                    else:
+                        klines_cache[symbol]['h1'] = h1_data
+                await asyncio.sleep(1)
+            return watchlist
+
+        async def start_websocket(watchlist):
+            async def handle_kline_socket(symbol, interval):
+                while True:
+                    try:
+                        async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
+                            active_sockets[(symbol, interval)] = kline_socket
+                            while True:
+                                kline = await kline_socket.recv()
+                                await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
+                                if interval == TIMEFRAME_M15 and 'k' in kline and kline['k']['x']:
+                                    m15_data = klines_cache[symbol]['m15'].copy()
+                                    h1_data = klines_cache[symbol]['h1'].copy()
+                                    if m15_data.empty or h1_data.empty:
+                                        logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
+                                        continue
+                                    m15_data.set_index('timestamp', inplace=True)
+                                    h1_data.set_index('timestamp', inplace=True)
+                                    cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index(), symbol)
+                                    if not cvd_signal_m15:
+                                        continue
+                                    stoch_m15_series = calculate_stochastic(m15_data)
+                                    stoch_h1_series = calculate_stochastic(h1_data)
+                                    if stoch_m15_series is None or stoch_h1_series is None:
+                                        continue
+                                    confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
+                                    stoch_m15 = stoch_m15_series[stoch_m15_series.index <= confirmation_ts].iloc[-1] if not stoch_m15_series[stoch_m15_series.index <= confirmation_ts].empty else None
+                                    stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
+                                    stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
+                                    if stoch_m15 is None or stoch_h1 is None:
+                                        continue
+                                    final_signal_message = None
+                                    base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
+                                    if cvd_signal_m15['type'] == 'LONG 📈' and stoch_m15 < 20:
+                                        if stoch_h1 > 25:
+                                            final_signal_message = {**base_signal, 'win_rate': '60%'}
+                                        elif stoch_h1 < 25:
+                                            final_signal_message = {**base_signal, 'win_rate': '80%'}
+                                    elif cvd_signal_m15['type'] == 'SHORT 📉' and stoch_m15 > 80:
+                                        if stoch_h1 < 75:
+                                            final_signal_message = {**base_signal, 'win_rate': '60%'}
+                                        elif stoch_h1 > 75:
+                                            final_signal_message = {**base_signal, 'win_rate': '80%'}
+                                    if final_signal_message:
+                                        signal_timestamp = final_signal_message['timestamp']
+                                        if last_sent_signals.get(symbol) != signal_timestamp:
+                                            await send_formatted_signal(bot_instance, final_signal_message)
+                                            last_sent_signals[symbol] = signal_timestamp
+                                            logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
+                                        else:
+                                            logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
+                                await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
+                        await asyncio.sleep(5)
+
+            tasks = []
+            for symbol in watchlist:
+                tasks.append(handle_kline_socket(symbol, TIMEFRAME_M15))
+                tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        watchlist = await initialize_watches()
+        if watchlist:
+            asyncio.create_task(start_websocket(watchlist))
+            asyncio.create_task(watchlist_monitor(bot_instance))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            logger.info("Task cancelled, cleaning up resources...")
+            await cleanup()
+        except Exception as e:
+            logger.error(f"Lỗi trong main loop: {e}")
+            await cleanup()
     finally:
-        for socket in active_sockets.values():
-            await socket.close()
+        await cleanup()
+
+async def cleanup():
+    global client, active_sockets
+    for socket in active_sockets.values():
+        await socket.close()
+    if client and not client.closed:
         await client.close_connection()
+    active_sockets.clear()
+    logger.info("Resources cleaned up successfully.")
 
 # --- HÀM ĐỊNH KỲ KIỂM TRA WATCHLIST ---
 async def watchlist_monitor(bot_instance):
     while True:
         try:
             from bot_handler import reload_signal_checker
-            await reload_signal_checker(bot_instance)  # Truyền bot_instance trực tiếp
+            await reload_signal_checker(bot_instance)
             await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Lỗi trong watchlist_monitor: {e}")
