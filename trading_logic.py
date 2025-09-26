@@ -74,6 +74,8 @@ async def get_klines(symbol, interval, limit=1500):
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
 def calculate_cvd_divergence(df):
+    global symbol  # Đảm bảo symbol được định nghĩa trong phạm vi hàm
+    logger.info(f"Tính CVD cho {symbol}: {len(df)} nến")
     if len(df) < 50 + FRACTAL_PERIODS:
         logger.warning(f"Không đủ dữ liệu cho {symbol}: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
         return None
@@ -97,6 +99,7 @@ def calculate_cvd_divergence(df):
         if is_pivot_low and is_downtrend:
             down_fractals.append(i)
     
+    logger.info(f"{symbol}: Tìm thấy {len(up_fractals)} fractal đỉnh, {len(down_fractals)} fractal đáy")
     current_bar_index = len(df) - 1
     signal = None
     if len(up_fractals) >= 2:
@@ -106,6 +109,7 @@ def calculate_cvd_divergence(df):
             High_Per_Price = df['high'].iloc[prev_pivot_idx]
             High_Last_Hist = df['cvd'].iloc[last_pivot_idx]
             High_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
+            logger.info(f"{symbol}: SHORT check - Price: {High_Last_Price} vs {High_Per_Price}, CVD: {High_Last_Hist} vs {High_Per_Hist}")
             if (High_Last_Price > High_Per_Price) and (High_Last_Hist < High_Per_Hist) and \
                (High_Last_Hist > 0 and High_Per_Hist > 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx], 
@@ -119,6 +123,7 @@ def calculate_cvd_divergence(df):
             Low_Per_Price = df['low'].iloc[prev_pivot_idx]
             Low_Last_Hist = df['cvd'].iloc[last_pivot_idx]
             Low_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
+            logger.info(f"{symbol}: LONG check - Price: {Low_Last_Price} vs {Low_Per_Price}, CVD: {Low_Last_Hist} vs {Low_Per_Hist}")
             if (Low_Last_Price < Low_Per_Price) and (Low_Last_Hist > Low_Per_Hist) and \
                (Low_Last_Hist < 0 and Low_Per_Hist < 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 
@@ -132,6 +137,7 @@ def calculate_cvd_divergence(df):
     return signal
 
 def calculate_stochastic(df):
+    logger.info(f"Tính Stochastic cho {len(df)} nến")
     if df.empty:
         logger.warning("Dataframe rỗng khi tính Stochastic")
         return None
@@ -139,6 +145,7 @@ def calculate_stochastic(df):
     stoch = df_reset.ta.stoch(k=STOCH_K, d=STOCH_D, smooth_k=STOCH_SMOOTH_K)
     if stoch is not None and not stoch.empty:
         stoch.index = df.index
+        logger.info(f"Stochastic tính xong: giá trị mới nhất = {stoch.iloc[-1]}")
         return stoch[f'STOCHk_{STOCH_K}_{STOCH_D}_{STOCH_SMOOTH_K}']
     logger.warning("Tính Stochastic thất bại")
     return None
@@ -190,16 +197,14 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
-async def run_signal_checker(bot):
+async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    from bot_handler import get_watchlist_from_db, send_formatted_signal, reload_signal_checker  # Thêm reload_signal_checker
+    from bot_handler import get_watchlist_from_db, send_formatted_signal
     
-    # Khởi tạo BinanceSocketManager
     client = await AsyncClient.create()
-    bsm = BinanceSocketManager(client, max_queue_size=1000)  # Tăng queue size
+    bsm = BinanceSocketManager(client, max_queue_size=1000)
     
-    # Lấy watchlist ban đầu
     async def initialize_watches():
         watchlist = await get_watchlist_from_db()
         if not watchlist:
@@ -215,13 +220,12 @@ async def run_signal_checker(bot):
             klines_cache[symbol]['h1'] = h1_data
         return watchlist
 
-    # Khởi tạo WebSocket
     async def start_websocket(watchlist):
         async def handle_kline_socket(symbol, interval):
             while True:
                 try:
                     async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
-                        active_sockets[(symbol, interval)] = kline_socket  # Lưu socket
+                        active_sockets[(symbol, interval)] = kline_socket
                         while True:
                             kline = await kline_socket.recv()
                             await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
@@ -261,12 +265,12 @@ async def run_signal_checker(bot):
                                 if final_signal_message:
                                     signal_timestamp = final_signal_message['timestamp']
                                     if last_sent_signals.get(symbol) != signal_timestamp:
-                                        await send_formatted_signal(bot, final_signal_message)
+                                        await send_formatted_signal(bot_instance, final_signal_message)  # Sử dụng bot_instance
                                         last_sent_signals[symbol] = signal_timestamp
                                         logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
                                     else:
                                         logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
-                            await asyncio.sleep(0.1)  # Giảm sleep để xử lý nhanh hơn
+                            await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
                     await asyncio.sleep(5)
@@ -277,22 +281,27 @@ async def run_signal_checker(bot):
             tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
         await asyncio.gather(*tasks)
 
-    # Task định kỳ reload watchlist
-    async def watchlist_monitor():
-        while True:
-            await reload_signal_checker(bot)  # Gọi hàm reload từ bot_handler
-            await asyncio.sleep(60)  # Kiểm tra mỗi 60 giây
-
     # Khởi chạy
     watchlist = await initialize_watches()
     if watchlist:
         asyncio.create_task(start_websocket(watchlist))
-        asyncio.create_task(watchlist_monitor())
+        asyncio.create_task(watchlist_monitor(bot_instance))  # Truyền bot_instance
     try:
-        await asyncio.Event().wait()  # Chờ mãi mãi
+        await asyncio.Event().wait()
     except Exception as e:
         logger.error(f"Lỗi trong main loop: {e}")
     finally:
         for socket in active_sockets.values():
             await socket.close()
         await client.close_connection()
+
+# --- HÀM ĐỊNH KỲ KIỂM TRA WATCHLIST ---
+async def watchlist_monitor(bot_instance):  # Thêm bot_instance làm tham số
+    while True:
+        try:
+            from bot_handler import reload_signal_checker  # Import tại đây để tránh vòng lặp
+            await reload_signal_checker(bot_instance)  # Gọi với bot_instance
+            await asyncio.sleep(60)  # Kiểm tra mỗi 60 giây
+        except Exception as e:
+            logger.error(f"Lỗi trong watchlist_monitor: {e}")
+            await asyncio.sleep(5)
