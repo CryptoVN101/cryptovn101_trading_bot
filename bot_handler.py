@@ -101,7 +101,7 @@ async def send_formatted_signal(bot: Bot, signal_data: dict):
     confirmation_time = datetime.fromtimestamp(signal_data['confirmation_timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
 
     signal_type_text = "Tín hiệu đảo chiều BUY/LONG" if 'LONG' in signal_data['type'] else "Tín hiệu đảo chiều BÁN/SHORT"
-    signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"
+    signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"  # Sửa lỗi thiếu emoji
     
     stoch_m15 = signal_data.get('stoch_m15', 0.0)
     stoch_h1 = signal_data.get('stoch_h1', 0.0)
@@ -157,3 +157,6 @@ def main():
 if __name__ == "__main__":
     from telegram.ext import CommandHandler
     main()
+
+# Export các hàm cần thiết
+__all__ = ['get_watchlist_from_db', 'send_formatted_signal', 'run_signal_checker', 'reload_signal_checker']

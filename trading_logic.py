@@ -175,6 +175,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_ins
                         final_signal['win_rate'] = win_rate
                         signal_key = (symbol, final_signal['timestamp'])
                         if signal_key not in last_sent_signals:
+                            from bot_handler import send_formatted_signal  # Di chuyển import vào đây
                             await send_formatted_signal(bot_instance, final_signal)
                             last_sent_signals[signal_key] = True
                             logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
@@ -184,8 +185,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_ins
 async def run_signal_checker(bot_instance):
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    from bot_handler import get_watchlist_from_db, send_formatted_signal
-    
+    from bot_handler import get_watchlist_from_db  # Di chuyển import vào đây
     client = await AsyncClient.create()
     bsm = BinanceSocketManager(client, max_queue_size=1000)
     
