@@ -12,7 +12,7 @@ import logging
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()  # Thêm handler mặc định cho console
+handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
@@ -23,8 +23,6 @@ TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
 TIMEFRAME_H1 = AsyncClient.KLINE_INTERVAL_1HOUR
 FRACTAL_PERIODS = 2
 CVD_PERIOD = 24
-
-# Cấu hình Stochastic
 STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
@@ -33,56 +31,44 @@ STOCH_D = 8
 last_sent_signals = {}
 klines_cache = {}
 vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-active_sockets = {}  # Lưu trữ các socket WebSocket để đóng khi cần
+active_sockets = {}
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
-async def get_klines(symbol, interval, limit=1000):
-    client = None
-    try:
-        client = await AsyncClient.create()
-        logger.info(f"Lấy {limit} nến cho {symbol} trên khung {interval}")
-        klines = None
+async def get_klines(symbol, interval, client, max_retries=3, limit=500):  # Giảm limit để tăng tốc
+    for attempt in range(max_retries):
         try:
+            logger.info(f"Lấy {limit} nến cho {symbol} trên khung {interval} (thử lần {attempt + 1})")
             klines = await client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-        except BinanceAPIException as e:
-            if e.code == -1121:
+            if not klines:
                 logger.info(f"Fallback to spot klines for {symbol}")
                 klines = await client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            else:
-                raise e
-        
-        if klines is None:
-            logger.error(f"Không thể lấy dữ liệu nến cho {symbol} trên khung {interval}")
+            if klines:
+                df = pd.DataFrame(klines, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+                ])
+                for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col])
+                logger.info(f"Đã lấy {len(df)} nến cho {symbol}")
+                return df
             raise ValueError("Could not retrieve klines from any market.")
-
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume', 
-            'close_time', 'quote_asset_volume', 'number_of_trades', 
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        
-        logger.info(f"Đã lấy {len(df)} nến cho {symbol}")
-        for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col])
-        return df
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy dữ liệu cho {symbol} trên khung {interval}: {e}")
-        return pd.DataFrame()
-    finally:
-        if client:
-            await client.close_connection()
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy dữ liệu cho {symbol} trên khung {interval}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)  # Backoff exponential
+            else:
+                return pd.DataFrame()
+    return pd.DataFrame()
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
 def calculate_cvd_divergence(df, symbol):
-    logger.info(f"Tính CVD cho {symbol}: {len(df)} nến")
     if len(df) < 50 + FRACTAL_PERIODS:
-        logger.warning(f"Không đủ dữ liệu cho {symbol}: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
         return None
     n = FRACTAL_PERIODS
     price_range = df['high'] - df['low']
     df['delta'] = np.where(price_range > 0, df['volume'] * (2 * df['close'] - df['low'] - df['high']) / price_range, 0)
     df['delta'] = df['delta'].fillna(0)
-    
     df['cvd'] = ta.ema(df['delta'], length=CVD_PERIOD)
     df['ema50'] = ta.ema(df['close'], length=50)
     
@@ -98,77 +84,55 @@ def calculate_cvd_divergence(df, symbol):
         if is_pivot_low and is_downtrend:
             down_fractals.append(i)
     
-    logger.info(f"{symbol}: Tìm thấy {len(up_fractals)} fractal đỉnh, {len(down_fractals)} fractal đáy")
     current_bar_index = len(df) - 1
     signal = None
     if len(up_fractals) >= 2:
         last_pivot_idx, prev_pivot_idx = up_fractals[-1], up_fractals[-2]
-        if (current_bar_index - last_pivot_idx) < 30:
-            High_Last_Price = df['high'].iloc[last_pivot_idx]
-            High_Per_Price = df['high'].iloc[prev_pivot_idx]
-            High_Last_Hist = df['cvd'].iloc[last_pivot_idx]
-            High_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
-            logger.info(f"{symbol}: SHORT check - Price: {High_Last_Price} vs {High_Per_Price}, CVD: {High_Last_Hist} vs {High_Per_Hist}")
-            if (High_Last_Price > High_Per_Price) and (High_Last_Hist < High_Per_Hist) and \
-               (High_Last_Hist > 0 and High_Per_Hist > 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
-                signal = {'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx], 
+        if current_bar_index - last_pivot_idx < 30:
+            if (df['high'].iloc[last_pivot_idx] > df['high'].iloc[prev_pivot_idx] and
+                df['cvd'].iloc[last_pivot_idx] < df['cvd'].iloc[prev_pivot_idx] and
+                df['cvd'].iloc[last_pivot_idx] > 0 and df['cvd'].iloc[prev_pivot_idx] > 0 and
+                last_pivot_idx - prev_pivot_idx < 30):
+                signal = {'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx],
                           'timestamp': df['timestamp'].iloc[last_pivot_idx],
-                          'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 
+                          'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n],
                           'confirmation_price': df['close'].iloc[last_pivot_idx + n]}
     if len(down_fractals) >= 2:
         last_pivot_idx, prev_pivot_idx = down_fractals[-1], down_fractals[-2]
-        if (current_bar_index - last_pivot_idx) < 30:
-            Low_Last_Price = df['low'].iloc[last_pivot_idx]
-            Low_Per_Price = df['low'].iloc[prev_pivot_idx]
-            Low_Last_Hist = df['cvd'].iloc[last_pivot_idx]
-            Low_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
-            logger.info(f"{symbol}: LONG check - Price: {Low_Last_Price} vs {Low_Per_Price}, CVD: {Low_Last_Hist} vs {Low_Per_Hist}")
-            if (Low_Last_Price < Low_Per_Price) and (Low_Last_Hist > Low_Per_Hist) and \
-               (Low_Last_Hist < 0 and Low_Per_Hist < 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
-                signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 
+        if current_bar_index - last_pivot_idx < 30:
+            if (df['low'].iloc[last_pivot_idx] < df['low'].iloc[prev_pivot_idx] and
+                df['cvd'].iloc[last_pivot_idx] > df['cvd'].iloc[prev_pivot_idx] and
+                df['cvd'].iloc[last_pivot_idx] < 0 and df['cvd'].iloc[prev_pivot_idx] < 0 and
+                last_pivot_idx - prev_pivot_idx < 30):
+                signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx],
                           'timestamp': df['timestamp'].iloc[last_pivot_idx],
-                          'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 
+                          'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n],
                           'confirmation_price': df['close'].iloc[last_pivot_idx + n]}
-    if signal:
-        logger.info(f"{symbol}: Tín hiệu được tạo: {signal}")
-    else:
-        logger.info(f"{symbol}: Không tạo được tín hiệu phân kỳ CVD")
     return signal
 
 def calculate_stochastic(df):
-    logger.info(f"Tính Stochastic cho {len(df)} nến")
     if df.empty:
-        logger.warning("Dataframe rỗng khi tính Stochastic")
         return None
     df_reset = df.reset_index(drop=True)
     stoch = df_reset.ta.stoch(k=STOCH_K, d=STOCH_D, smooth_k=STOCH_SMOOTH_K)
     if stoch is not None and not stoch.empty:
         stoch.index = df.index
-        logger.info(f"Stochastic tính xong: giá trị mới nhất = {stoch.iloc[-1]}")
         return stoch[f'STOCHk_{STOCH_K}_{STOCH_D}_{STOCH_SMOOTH_K}']
-    logger.warning("Tính Stochastic thất bại")
     return None
 
 # --- XỬ LÝ DỮ LIỆU WEBSOCKET ---
-async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
+async def process_kline_data(symbol, interval, kline, m15_data, h1_data, bot_instance):
     if 'k' not in kline:
         logger.error(f"Dữ liệu WebSocket không hợp lệ cho {symbol} ({interval}): {kline}")
         return
     timestamp = datetime.fromtimestamp(kline['k']['t'] / 1000, vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')
     kline_data = kline['k']
     new_candle = {
-        'timestamp': kline_data['t'],
-        'open': float(kline_data['o']),
-        'high': float(kline_data['h']),
-        'low': float(kline_data['l']),
-        'close': float(kline_data['c']),
-        'volume': float(kline_data['v']),
-        'close_time': kline_data['T'],
-        'quote_asset_volume': float(kline_data['q']),
-        'number_of_trades': kline_data['n'],
-        'taker_buy_base_asset_volume': float(kline_data['V']),
-        'taker_buy_quote_asset_volume': float(kline_data['Q']),
-        'ignore': 0
+        'timestamp': kline_data['t'], 'open': float(kline_data['o']), 'high': float(kline_data['h']),
+        'low': float(kline_data['l']), 'close': float(kline_data['c']), 'volume': float(kline_data['v']),
+        'close_time': kline_data['T'], 'quote_asset_volume': float(kline_data['q']),
+        'number_of_trades': kline_data['n'], 'taker_buy_base_asset_volume': float(kline_data['V']),
+        'taker_buy_quote_asset_volume': float(kline_data['Q']), 'ignore': 0
     }
     
     if interval == TIMEFRAME_M15:
@@ -190,13 +154,34 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
     else:
         klines_cache[symbol]['h1'] = df
     
-    if kline_data['x']:
+    if kline_data['x']:  # Xử lý khi nến đóng
         logger.info(f"Nhận nến mới và xử lý cho {symbol} trên khung {interval} tại {timestamp}")
         logger.info(f"Cập nhật cache cho {symbol}: M15={len(klines_cache[symbol]['m15'])}, H1={len(klines_cache[symbol]['h1'])} nến")
+        m15_data = klines_cache[symbol]['m15'].copy().set_index('timestamp')
+        h1_data = klines_cache[symbol]['h1'].copy().set_index('timestamp')
+        cvd_signal = calculate_cvd_divergence(m15_data.reset_index(), symbol)
+        if cvd_signal:
+            stoch_m15 = calculate_stochastic(m15_data)
+            stoch_h1 = calculate_stochastic(h1_data)
+            if stoch_m15 is not None and stoch_h1 is not None:
+                confirmation_ts = pd.to_datetime(cvd_signal['confirmation_timestamp'], unit='ms')
+                stoch_m15_value = stoch_m15[stoch_m15.index <= confirmation_ts].iloc[-1] if not stoch_m15[stoch_m15.index <= confirmation_ts].empty else None
+                stoch_h1_value = stoch_h1[h1_data.index <= confirmation_ts].iloc[-1] if not stoch_h1[h1_data.index <= confirmation_ts].empty else None
+                if stoch_m15_value is not None and stoch_h1_value is not None:
+                    final_signal = {**cvd_signal, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15_value, 'stoch_h1': stoch_h1_value}
+                    if (cvd_signal['type'] == 'LONG 📈' and stoch_m15_value < 20) or (cvd_signal['type'] == 'SHORT 📉' and stoch_m15_value > 80):
+                        win_rate = '80%' if ((cvd_signal['type'] == 'LONG 📈' and stoch_h1_value < 25) or
+                                           (cvd_signal['type'] == 'SHORT 📉' and stoch_h1_value > 75)) else '60%'
+                        final_signal['win_rate'] = win_rate
+                        signal_key = (symbol, final_signal['timestamp'])
+                        if signal_key not in last_sent_signals:
+                            await send_formatted_signal(bot_instance, final_signal)
+                            last_sent_signals[signal_key] = True
+                            logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
-async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
+async def run_signal_checker(bot_instance):
     logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     from bot_handler import get_watchlist_from_db, send_formatted_signal
@@ -209,24 +194,15 @@ async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
         if not watchlist:
             logger.warning("Watchlist rỗng. Đợi cập nhật watchlist...")
             return
-        for i in range(0, len(watchlist), 5):
-            batch = watchlist[i:i+5]
-            tasks = []
-            for symbol in batch:
-                klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
-                tasks.append(get_klines(symbol, TIMEFRAME_M15))
-                tasks.append(get_klines(symbol, TIMEFRAME_H1))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for symbol, (m15_data, h1_data) in zip(batch, zip(results[::2], results[1::2])):
-                if isinstance(m15_data, Exception):
-                    logger.error(f"Lỗi tải M15 cho {symbol}: {m15_data}")
-                else:
-                    klines_cache[symbol]['m15'] = m15_data
-                if isinstance(h1_data, Exception):
-                    logger.error(f"Lỗi tải H1 cho {symbol}: {h1_data}")
-                else:
-                    klines_cache[symbol]['h1'] = h1_data
-            await asyncio.sleep(1)
+        for symbol in watchlist:
+            klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
+            m15_data = await get_klines(symbol, TIMEFRAME_M15, client)
+            h1_data = await get_klines(symbol, TIMEFRAME_H1, client)
+            if not m15_data.empty:
+                klines_cache[symbol]['m15'] = m15_data
+            if not h1_data.empty:
+                klines_cache[symbol]['h1'] = h1_data
+            await asyncio.sleep(0.5)
         return watchlist
 
     async def start_websocket(watchlist):
@@ -235,60 +211,26 @@ async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
                 try:
                     async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
                         active_sockets[(symbol, interval)] = kline_socket
+                        logger.debug(f"WebSocket connected for {symbol} ({interval})")
                         while True:
                             kline = await kline_socket.recv()
-                            await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
-                            if interval == TIMEFRAME_M15 and 'k' in kline and kline['k']['x']:
-                                m15_data = klines_cache[symbol]['m15'].copy()
-                                h1_data = klines_cache[symbol]['h1'].copy()
-                                if m15_data.empty or h1_data.empty:
-                                    logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
-                                    continue
-                                m15_data.set_index('timestamp', inplace=True)
-                                h1_data.set_index('timestamp', inplace=True)
-                                cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index(), symbol)
-                                if not cvd_signal_m15:
-                                    continue
-                                stoch_m15_series = calculate_stochastic(m15_data)
-                                stoch_h1_series = calculate_stochastic(h1_data)
-                                if stoch_m15_series is None or stoch_h1_series is None:
-                                    continue
-                                confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
-                                stoch_m15 = stoch_m15_series[stoch_m15_series.index <= confirmation_ts].iloc[-1] if not stoch_m15_series[stoch_m15_series.index <= confirmation_ts].empty else None
-                                stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
-                                stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
-                                if stoch_m15 is None or stoch_h1 is None:
-                                    continue
-                                final_signal_message = None
-                                base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
-                                if cvd_signal_m15['type'] == 'LONG 📈' and stoch_m15 < 20:
-                                    if stoch_h1 > 25:
-                                        final_signal_message = {**base_signal, 'win_rate': '60%'}
-                                    elif stoch_h1 < 25:
-                                        final_signal_message = {**base_signal, 'win_rate': '80%'}
-                                elif cvd_signal_m15['type'] == 'SHORT 📉' and stoch_m15 > 80:
-                                    if stoch_h1 < 75:
-                                        final_signal_message = {**base_signal, 'win_rate': '60%'}
-                                    elif stoch_h1 > 75:
-                                        final_signal_message = {**base_signal, 'win_rate': '80%'}
-                                if final_signal_message:
-                                    signal_timestamp = final_signal_message['timestamp']
-                                    if last_sent_signals.get(symbol) != signal_timestamp:
-                                        await send_formatted_signal(bot_instance, final_signal_message)
-                                        last_sent_signals[symbol] = signal_timestamp
-                                        logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
-                                    else:
-                                        logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
+                            await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'], bot_instance)
                             await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
                     await asyncio.sleep(5)
 
-        tasks = []
-        for symbol in watchlist:
-            tasks.append(handle_kline_socket(symbol, TIMEFRAME_M15))
-            tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
+        tasks = [handle_kline_socket(symbol, TIMEFRAME_M15) for symbol in watchlist] + \
+                [handle_kline_socket(symbol, TIMEFRAME_H1) for symbol in watchlist]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def cleanup():
+        for socket in active_sockets.values():
+            await socket.close()
+        if client and not client.session.closed:
+            await client.close_connection()
+        active_sockets.clear()
+        logger.info("Resources cleaned up successfully.")
 
     watchlist = await initialize_watches()
     if watchlist:
@@ -296,20 +238,22 @@ async def run_signal_checker(bot_instance):  # Đảm bảo nhận instance Bot
         asyncio.create_task(watchlist_monitor(bot_instance))
     try:
         await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        logger.info("Task cancelled, cleaning up resources...")
+        await cleanup()
     except Exception as e:
         logger.error(f"Lỗi trong main loop: {e}")
+        await cleanup()
     finally:
-        for socket in active_sockets.values():
-            await socket.close()
-        await client.close_connection()
+        await cleanup()
 
 # --- HÀM ĐỊNH KỲ KIỂM TRA WATCHLIST ---
 async def watchlist_monitor(bot_instance):
     while True:
         try:
             from bot_handler import reload_signal_checker
-            await reload_signal_checker(bot_instance)  # Truyền bot_instance trực tiếp
-            await asyncio.sleep(60)
+            await reload_signal_checker(bot_instance)
+            await asyncio.sleep(300)  # Tăng lên 5 phút để giảm tần suất reload
         except Exception as e:
             logger.error(f"Lỗi trong watchlist_monitor: {e}")
             await asyncio.sleep(5)
