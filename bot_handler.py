@@ -1,10 +1,10 @@
+# bot_handler.py
+
 import asyncio
-import os
 from datetime import datetime
 import pytz
-from telegram import Update
-from telegram.ext import ContextTypes, Application
-from telegram import Bot
+from telegram import Update, Bot
+from telegram.ext import ContextTypes
 from config import CHANNEL_ID
 from backtester import run_backtest_logic
 from database import (
@@ -12,26 +12,34 @@ from database import (
     add_symbols_to_db, 
     remove_symbols_from_db
 )
-from trading_logic import run_signal_checker
+# Không import run_signal_checker ở đây nữa, main.py sẽ quản lý
 
 # Cấu hình logging
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Khởi tạo bot
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Thay bằng token của bạn
-application = Application.builder().token(BOT_TOKEN).build()
-bot = Bot(BOT_TOKEN)
 
-# Hàm reload watchlist và restart WebSocket
-async def reload_signal_checker(bot_instance):  # Thay context bằng bot_instance
-    logger.info("Bắt đầu reload watchlist...")
-    global watchlist_task
-    if 'watchlist_task' in globals() and not watchlist_task.done():
-        watchlist_task.cancel()
-    watchlist_task = asyncio.create_task(run_signal_checker(bot_instance))
-    logger.info("WebSocket đã được khởi động lại với watchlist mới.")
+async def _reload_or_restart_logic(context: ContextTypes.DEFAULT_TYPE):
+    """Hàm logic chung để khởi động lại bộ quét tín hiệu."""
+    from trading_logic import run_signal_checker # Import tại đây để tránh phụ thuộc vòng
+    
+    logger.info("Bắt đầu reload/restart bộ quét tín hiệu...")
+    
+    # Lấy task đang chạy từ context của application
+    task = context.application.bot_data.get("watchlist_task")
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task # Đợi task kết thúc hẳn sau khi hủy
+        except asyncio.CancelledError:
+            logger.info("Task cũ đã được hủy thành công.")
+
+    # Tạo lại task mới và lưu lại vào context
+    new_task = asyncio.create_task(run_signal_checker(context.bot))
+    context.application.bot_data["watchlist_task"] = new_task
+    logger.info("Bộ quét tín hiệu đã được khởi động lại với watchlist mới.")
+
 
 # Handler cho /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -51,8 +59,8 @@ async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     if symbols_to_add:
         await add_symbols_to_db(symbols_to_add)
-        await update.message.reply_text(f"Đã thêm thành công: {', '.join(symbols_to_add)}")
-        await reload_signal_checker(context.bot)  # Sử dụng context.bot
+        await update.message.reply_text(f"Đã thêm thành công: {', '.join(symbols_to_add)}. Đang tải lại...")
+        await _reload_or_restart_logic(context)
     else:
         await update.message.reply_text("Các mã coin này đã có trong danh sách.")
 
@@ -68,11 +76,11 @@ async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if symbols_to_remove:
         await remove_symbols_from_db(symbols_to_remove)
-        message = f"Đã xóa thành công: {', '.join(symbols_to_remove)}"
+        message = f"Đã xóa thành công: {', '.join(symbols_to_remove)}. Đang tải lại..."
         if not_found_symbols:
             message += f"\nKhông tìm thấy: {', '.join(not_found_symbols)}"
         await update.message.reply_text(message)
-        await reload_signal_checker(context.bot)  # Sử dụng context.bot
+        await _reload_or_restart_logic(context)
     else:
         await update.message.reply_text("Không tìm thấy các mã coin này trong danh sách.")
 
@@ -87,11 +95,8 @@ async def list_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # Handler cho /restart
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Đang khởi động lại bot...")
-    global watchlist_task
-    if 'watchlist_task' in globals() and not watchlist_task.done():
-        watchlist_task.cancel()
-    watchlist_task = asyncio.create_task(run_signal_checker(context.bot))
+    await update.message.reply_text("Đang khởi động lại bộ quét tín hiệu...")
+    await _reload_or_restart_logic(context)
     await update.message.reply_text("Bot đã được khởi động lại.")
 
 # Hàm gửi tín hiệu
@@ -101,7 +106,7 @@ async def send_formatted_signal(bot: Bot, signal_data: dict):
     confirmation_time = datetime.fromtimestamp(signal_data['confirmation_timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
 
     signal_type_text = "Tín hiệu đảo chiều BUY/LONG" if 'LONG' in signal_data['type'] else "Tín hiệu đảo chiều BÁN/SHORT"
-    signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"  # Sửa lỗi thiếu emoji
+    signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"
     
     stoch_m15 = signal_data.get('stoch_m15', 0.0)
     stoch_h1 = signal_data.get('stoch_h1', 0.0)
@@ -139,24 +144,3 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logger.error(f"Lỗi backtest: {e}")
         await update.message.reply_text(f"Rất tiếc, đã có lỗi: {e}")
-
-# Đăng ký các handler
-def main():
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("add", add_symbol))
-    application.add_handler(CommandHandler("remove", remove_symbol))
-    application.add_handler(CommandHandler("list", list_symbols))
-    application.add_handler(CommandHandler("restart", restart_bot))
-    application.add_handler(CommandHandler("backtest", backtest_command))
-
-    # Khởi chạy bot và trading_logic
-    global watchlist_task
-    watchlist_task = asyncio.create_task(run_signal_checker(bot))
-    application.run_polling()
-
-if __name__ == "__main__":
-    from telegram.ext import CommandHandler
-    main()
-
-# Export các hàm cần thiết
-__all__ = ['get_watchlist_from_db', 'send_formatted_signal', 'run_signal_checker', 'reload_signal_checker']
