@@ -9,3 +9,5 @@ python-binance>=1.0.19
 pytz
 scipy
 asyncpg
+
+# pip install -r requirements.txt

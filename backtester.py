@@ -16,7 +16,7 @@ from trading_logic import (
 )
 
 # --- CẤU HÌNH BACKTEST ---
-SYMBOLS_TO_TEST = ["BTCUSDT", "ETHUSDT"] # Thêm các mã bạn muốn backtest
+SYMBOLS_TO_TEST = ["EIGENUSDT", "BERAUSDT"] # Thêm các mã bạn muốn backtest
 CANDLE_LIMIT = 1500
 
 # --- HÀM IN TÍN HIỆU (Giữ nguyên) ---
