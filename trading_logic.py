@@ -169,7 +169,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
             df = pd.DataFrame([new_candle])
         else:
             df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
-            df = df.tail(1500)  # Giữ tối đa 1500 nến
+            df = df.tail(1000)  # Giữ tối đa 1000 nến
         
         for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col])
