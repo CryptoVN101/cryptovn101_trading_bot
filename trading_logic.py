@@ -8,22 +8,19 @@ import pandas_ta as ta
 from binance.async_client import AsyncClient 
 from binance.exceptions import BinanceAPIException
 
-# --- CẤU HÌNH MỚI CHO CHỈ BÁO ---
+# --- CẤU HÌNH ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
 TIMEFRAME_H1 = AsyncClient.KLINE_INTERVAL_1HOUR
-FRACTAL_PERIODS = 2 # Đã cập nhật lại theo yêu cầu
+FRACTAL_PERIODS = 2
 CVD_PERIOD = 24
-
-# Cấu hình Stochastic (không đổi)
 STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
 
-# Biến global để lưu trữ "trí nhớ" của bot
 last_sent_signals = {}
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
-async def get_klines(symbol, interval, limit=300):
+async def get_klines(symbol, interval, limit=1500): # TĂNG GIỚI HẠN LÊN 1500
     client = None
     try:
         client = await AsyncClient.create()
@@ -62,41 +59,38 @@ def calculate_cvd_divergence(df):
     price_range = df['high'] - df['low']
     df['delta'] = np.where(price_range > 0, df['volume'] * (2 * df['close'] - df['low'] - df['high']) / price_range, 0)
     df['delta'] = df['delta'].fillna(0)
-    
     df['cvd'] = ta.ema(df['delta'], length=CVD_PERIOD)
-    
     df['ema50'] = ta.ema(df['close'], length=50)
     
-    up_fractals = []
-    down_fractals = []
+    up_fractals, down_fractals = [], []
     for i in range(n, len(df) - n):
-        is_pivot_high = df['high'].iloc[i] == df['high'].iloc[i-n:i+n+1].max()
-        is_pivot_low = df['low'].iloc[i] == df['low'].iloc[i-n:i+n+1].min()
-        if is_pivot_high: up_fractals.append(i)
-        if is_pivot_low: down_fractals.append(i)
-        
+        is_uptrend = df['close'].iloc[i - n] > df['ema50'].iloc[i - n]
+        is_downtrend = df['close'].iloc[i - n] < df['ema50'].iloc[i - n]
+        is_pivot_high = all(df['high'].iloc[i] >= df['high'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+        is_pivot_low = all(df['low'].iloc[i] <= df['low'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+        if is_pivot_high and is_uptrend: up_fractals.append(i)
+        if is_pivot_low and is_downtrend: down_fractals.append(i)
+
     current_bar_index = len(df) - 1
     signal = None
     if len(up_fractals) >= 2:
         last_pivot_idx, prev_pivot_idx = up_fractals[-1], up_fractals[-2]
-        last_val_idx, prev_val_idx = last_pivot_idx - n, prev_pivot_idx - n
         if (current_bar_index - last_pivot_idx) < 30 :
-            High_Last_Price = df['high'].iloc[last_val_idx]
-            High_Per_Price = df['high'].iloc[prev_val_idx]
-            High_Last_Hist = df['cvd'].iloc[last_val_idx]
-            High_Per_Hist = df['cvd'].iloc[prev_val_idx]
+            High_Last_Price = df['high'].iloc[last_pivot_idx]
+            High_Per_Price = df['high'].iloc[prev_pivot_idx]
+            High_Last_Hist = df['cvd'].iloc[last_pivot_idx]
+            High_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
             if (High_Last_Price > High_Per_Price) and (High_Last_Hist < High_Per_Hist) and \
                (High_Last_Hist > 0 and High_Per_Hist > 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx], 'timestamp': df['timestamp'].iloc[last_pivot_idx],
                           'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 'confirmation_price': df['close'].iloc[last_pivot_idx + n]}
     if len(down_fractals) >= 2:
         last_pivot_idx, prev_pivot_idx = down_fractals[-1], down_fractals[-2]
-        last_val_idx, prev_val_idx = last_pivot_idx - n, prev_pivot_idx - n
         if (current_bar_index - last_pivot_idx) < 30:
-            Low_Last_Price = df['low'].iloc[last_val_idx]
-            Low_Per_Price = df['low'].iloc[prev_val_idx]
-            Low_Last_Hist = df['cvd'].iloc[last_val_idx]
-            Low_Per_Hist = df['cvd'].iloc[prev_val_idx]
+            Low_Last_Price = df['low'].iloc[last_pivot_idx]
+            Low_Per_Price = df['low'].iloc[prev_pivot_idx]
+            Low_Last_Hist = df['cvd'].iloc[last_pivot_idx]
+            Low_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
             if (Low_Last_Price < Low_Per_Price) and (Low_Last_Hist > Low_Per_Hist) and \
                (Low_Last_Hist < 0 and Low_Per_Hist < 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 'timestamp': df['timestamp'].iloc[last_pivot_idx],
@@ -117,7 +111,6 @@ def calculate_stochastic(df):
 async def run_signal_checker(bot):
     print("🚀 Signal checker is running...")
     from bot_handler import get_watchlist_from_db, send_formatted_signal 
-    
     while True:
         now = datetime.now(pytz.utc)
         next_run_minute = (now.minute // 15 + 1) * 15
@@ -125,46 +118,35 @@ async def run_signal_checker(bot):
             next_run_time = now.replace(minute=0, second=5, microsecond=0) + timedelta(hours=1)
         else:
             next_run_time = now.replace(minute=next_run_minute, second=5, microsecond=0)
-        
         sleep_duration = (next_run_time - now).total_seconds()
-        
         if sleep_duration > 0:
             print(f"Next scan at {next_run_time.astimezone(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%H:%M:%S')}. Sleeping for {sleep_duration:.0f} seconds.")
             await asyncio.sleep(sleep_duration)
-
         print(f"\n--- Waking up at {datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%Y-%m-%d %H:%M:%S')} to scan signals ---")
         watchlist = await get_watchlist_from_db()
         if not watchlist:
             print("Watchlist is empty. Will check again on the next cycle.")
             continue
-            
         for symbol in watchlist:
             print(f"   -> Scanning {symbol}...")
             try:
                 m15_data, h1_data = await asyncio.gather(get_klines(symbol, TIMEFRAME_M15), get_klines(symbol, TIMEFRAME_H1))
                 if m15_data.empty or h1_data.empty: continue
-
                 m15_data.set_index('timestamp', inplace=True)
                 h1_data.set_index('timestamp', inplace=True)
-
                 cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index())
                 if not cvd_signal_m15: continue
-
                 stoch_m15_series = calculate_stochastic(m15_data)
                 stoch_h1_series = calculate_stochastic(h1_data)
                 if stoch_m15_series is None or stoch_h1_series is None: continue
-                
                 confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
-                
                 try:
                     stoch_m15 = stoch_m15_series.loc[confirmation_ts]
                     stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
                     stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
                 except (KeyError, IndexError):
                     continue
-
                 if stoch_h1 is None: continue
-
                 final_signal_message = None
                 base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
                 if cvd_signal_m15['type'] == 'LONG 📈':
@@ -177,7 +159,6 @@ async def run_signal_checker(bot):
                         final_signal_message = {**base_signal, 'win_rate': '60%'}
                     elif stoch_m15 > 80 and stoch_h1 > 75: 
                         final_signal_message = {**base_signal, 'win_rate': '80%'}
-
                 if final_signal_message:
                     signal_timestamp = final_signal_message['timestamp']
                     if last_sent_signals.get(symbol) != signal_timestamp:
@@ -185,8 +166,6 @@ async def run_signal_checker(bot):
                         last_sent_signals[symbol] = signal_timestamp
                     else:
                         print(f"   -> Duplicate signal for {symbol}. Skipping.")
-
-
             except Exception as e:
                 print(f"Lỗi không xác định khi xử lý mã {symbol}: {e}")
             await asyncio.sleep(3)
