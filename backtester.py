@@ -3,12 +3,15 @@ import asyncio
 from datetime import datetime
 import pytz
 import pandas as pd
+import numpy as np
+import pandas_ta as ta
 from trading_logic import (
     get_klines,
     calculate_stochastic,
-    calculate_cvd_divergence, # SỬ DỤNG CÙNG MỘT HÀM
     TIMEFRAME_M15,
-    TIMEFRAME_H1
+    TIMEFRAME_H1,
+    FRACTAL_PERIODS,
+    CVD_PERIOD
 )
 
 # --- CẤU HÌNH BACKTEST ---
@@ -36,7 +39,49 @@ def print_signal(signal_data):
     print(f"    (Debug) Stoch M15: {signal_data.get('stoch_m15', 0):.2f} | Stoch H1: {signal_data.get('stoch_h1', 0):.2f}")
     print("==================================================")
 
-# --- BỘ MÁY BACKTEST MÔ PHỎNG REAL-TIME ---
+# --- LOGIC BACKTEST TỐI ƯU HÓA ---
+
+def find_all_divergences_optimized(df, timeframe):
+    """
+    Hàm tối ưu để tìm tất cả các tín hiệu phân kỳ trong một bộ dữ liệu lịch sử.
+    """
+    if len(df) < 50 + FRACTAL_PERIODS: return []
+
+    # 1. Tính toán tất cả các chỉ báo MỘT LẦN
+    price_range = df['high'] - df['low']
+    df['delta'] = np.where(price_range > 0, df['volume'] * (2 * df['close'] - df['low'] - df['high']) / price_range, 0)
+    df['delta'] = df['delta'].fillna(0)
+    df['cvd'] = ta.ema(df['delta'], length=CVD_PERIOD)
+    df['ema50'] = ta.ema(df['close'], length=50)
+
+    # 2. Tìm tất cả các điểm pivot hợp lệ MỘT LẦN
+    up_fractals, down_fractals = [], []
+    n = FRACTAL_PERIODS
+    for i in range(n, len(df) - n):
+        is_uptrend = df['close'].iloc[i - n] > df['ema50'].iloc[i - n]
+        is_downtrend = df['close'].iloc[i - n] < df['ema50'].iloc[i - n]
+        
+        is_pivot_high = all(df['high'].iloc[i] >= df['high'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+        is_pivot_low = all(df['low'].iloc[i] <= df['low'].iloc[j] for j in range(i - n, i + n + 1) if j != i)
+
+        if is_pivot_high and is_uptrend: up_fractals.append(i)
+        if is_pivot_low and is_downtrend: down_fractals.append(i)
+
+    signals = []
+    
+    # 3. Quét qua các pivot để tìm phân kỳ
+    for i in range(1, len(up_fractals)):
+        prev_idx, last_idx = up_fractals[i-1], up_fractals[i]
+        if (last_idx - prev_idx) < 30 and (df['high'].iloc[last_idx] > df['high'].iloc[prev_idx]) and (df['cvd'].iloc[last_idx] < df['cvd'].iloc[prev_idx]) and (df['cvd'].iloc[last_idx] > 0 and df['cvd'].iloc[prev_idx] > 0):
+            signals.append({'type': 'SHORT 📉', 'price': df['close'].iloc[last_idx], 'timestamp': df['timestamp'].iloc[last_idx], 'confirmation_timestamp': df['timestamp'].iloc[last_idx + n], 'confirmation_price': df['close'].iloc[last_idx + n], 'timeframe': timeframe})
+
+    for i in range(1, len(down_fractals)):
+        prev_idx, last_idx = down_fractals[i-1], down_fractals[i]
+        if (last_idx - prev_idx) < 30 and (df['low'].iloc[last_idx] < df['low'].iloc[prev_idx]) and (df['cvd'].iloc[last_idx] > df['cvd'].iloc[prev_idx]) and (df['cvd'].iloc[last_idx] < 0 and df['cvd'].iloc[prev_idx] < 0):
+            signals.append({'type': 'LONG 📈', 'price': df['close'].iloc[last_idx], 'timestamp': df['timestamp'].iloc[last_idx], 'confirmation_timestamp': df['timestamp'].iloc[last_idx + n], 'confirmation_price': df['close'].iloc[last_idx + n], 'timeframe': timeframe})
+                
+    return signals
+
 async def run_backtest_logic():
     all_final_signals = []
     
@@ -54,37 +99,29 @@ async def run_backtest_logic():
         m15_data_full.set_index('timestamp', inplace=True)
         h1_data_full.set_index('timestamp', inplace=True)
 
-        last_signal_ts = 0
+        m15_signals = find_all_divergences_optimized(m15_data_full.copy().reset_index(), 'M15')
         
-        # Mô phỏng vòng lặp của bot real-time
-        for i in range(300, len(m15_data_full)):
-            df_slice_m15 = m15_data_full.iloc[:i]
-            
-            # SỬ DỤNG CHUNG HÀM TÍNH TOÁN
-            cvd_signal = calculate_cvd_divergence(df_slice_m15.copy().reset_index())
-            
-            if cvd_signal and cvd_signal['timestamp'] != last_signal_ts:
-                try:
-                    stoch_m15_val = m15_data_full.loc[cvd_signal['confirmation_timestamp'], 'stoch_k']
-                    stoch_h1_val = h1_data_full.loc[h1_data_full.index <= cvd_signal['confirmation_timestamp'], 'stoch_k'].iloc[-1]
-                except (KeyError, IndexError):
-                    continue
+        for signal in m15_signals:
+            try:
+                stoch_m15_val = m15_data_full.loc[signal['confirmation_timestamp'], 'stoch_k']
+                stoch_h1_val = h1_data_full.loc[h1_data_full.index <= signal['confirmation_timestamp'], 'stoch_k'].iloc[-1]
+            except (KeyError, IndexError):
+                continue
 
-                base_signal = {**cvd_signal, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15_val, 'stoch_h1': stoch_h1_val}
-                final_signal = None
-                
-                if cvd_signal['type'] == 'LONG 📈' and stoch_m15_val < 20:
-                    if stoch_h1_val > 25: final_signal = {**base_signal, 'win_rate': '60%'}
-                    elif stoch_h1_val < 25: final_signal = {**base_signal, 'win_rate': '80%'}
-                elif cvd_signal['type'] == 'SHORT 📉' and stoch_m15_val > 80:
-                    if stoch_h1_val < 75: final_signal = {**base_signal, 'win_rate': '60%'}
-                    elif stoch_h1_val > 75: final_signal = {**base_signal, 'win_rate': '80%'}
-                
-                if final_signal:
-                    all_final_signals.append(final_signal)
-                    last_signal_ts = cvd_signal['timestamp'] # Ghi nhớ tín hiệu đã tìm thấy
+            base_signal = {**signal, 'symbol': symbol, 'stoch_m15': stoch_m15_val, 'stoch_h1': stoch_h1_val}
+            final_signal = None
+            
+            if signal['type'] == 'LONG 📈' and stoch_m15_val < 20:
+                if stoch_h1_val > 25: final_signal = {**base_signal, 'win_rate': '60%'}
+                elif stoch_h1_val < 25: final_signal = {**base_signal, 'win_rate': '80%'}
+            elif signal['type'] == 'SHORT 📉' and stoch_m15_val > 80:
+                if stoch_h1_val < 75: final_signal = {**base_signal, 'win_rate': '60%'}
+                elif stoch_h1_val > 75: final_signal = {**base_signal, 'win_rate': '80%'}
+            
+            if final_signal:
+                all_final_signals.append(final_signal)
     
-    return all_final_signals
+    return sorted(all_final_signals, key=lambda x: x['timestamp'])
 
 async def main():
     print("--- Chạy Backtester ở chế độ Standalone ---")
