@@ -10,8 +10,10 @@ from binance import AsyncClient, BinanceSocketManager
 import logging
 
 # Cấu hình logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
+logger.handlers[0].setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+logger.handlers[0].formatter.converter = lambda *args: datetime.now(vietnam_tz).timetuple()
 
 # --- CẤU HÌNH CHỈ BÁO ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
@@ -145,47 +147,51 @@ def calculate_stochastic(df):
 
 # --- XỬ LÝ DỮ LIỆU WEBSOCKET ---
 async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
-    logger.info(f"Nhận nến mới cho {symbol} trên khung {interval} tại {datetime.fromtimestamp(kline['k']['t'] / 1000, vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+    timestamp = datetime.fromtimestamp(kline['k']['t'] / 1000, vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')
+    logger.info(f"Nhận nến mới cho {symbol} trên khung {interval} tại {timestamp}")
     kline_data = kline['k']
-    if kline_data['x']:  # Chỉ xử lý khi nến đóng
-        new_candle = {
-            'timestamp': kline_data['t'],
-            'open': float(kline_data['o']),
-            'high': float(kline_data['h']),
-            'low': float(kline_data['l']),
-            'close': float(kline_data['c']),
-            'volume': float(kline_data['v']),
-            'close_time': kline_data['T'],
-            'quote_asset_volume': float(kline_data['q']),
-            'number_of_trades': kline_data['n'],
-            'taker_buy_base_asset_volume': float(kline_data['V']),
-            'taker_buy_quote_asset_volume': float(kline_data['Q']),
-            'ignore': 0
-        }
-        
-        if interval == TIMEFRAME_M15:
-            df = m15_data
-        else:
-            df = h1_data
-        
-        if df.empty:
-            df = pd.DataFrame([new_candle])
-        else:
-            df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
-            df = df.tail(1500)  # Giữ tối đa 1500 nến
-        
-        for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col])
-        
-        if interval == TIMEFRAME_M15:
-            klines_cache[symbol]['m15'] = df
-        else:
-            klines_cache[symbol]['h1'] = df
-        logger.info(f"Cập nhật cache cho {symbol}: M15={len(klines_cache[symbol]['m15'])}, H1={len(klines_cache[symbol]['h1'])}")
+    new_candle = {
+        'timestamp': kline_data['t'],
+        'open': float(kline_data['o']),
+        'high': float(kline_data['h']),
+        'low': float(kline_data['l']),
+        'close': float(kline_data['c']),
+        'volume': float(kline_data['v']),
+        'close_time': kline_data['T'],
+        'quote_asset_volume': float(kline_data['q']),
+        'number_of_trades': kline_data['n'],
+        'taker_buy_base_asset_volume': float(kline_data['V']),
+        'taker_buy_quote_asset_volume': float(kline_data['Q']),
+        'ignore': 0
+    }
+    
+    if interval == TIMEFRAME_M15:
+        df = m15_data
+    else:
+        df = h1_data
+    
+    if df.empty:
+        df = pd.DataFrame([new_candle])
+    else:
+        df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
+        df = df.tail(1500)
+    
+    for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col])
+    
+    if interval == TIMEFRAME_M15:
+        klines_cache[symbol]['m15'] = df
+    else:
+        klines_cache[symbol]['h1'] = df
+    if kline_data['x']:
+        logger.info(f"Cập nhật cache cho {symbol}: M15={len(klines_cache[symbol]['m15'])}, H1={len(klines_cache[symbol]['h1'])} nến")
         logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
+    else:
+        logger.info(f"Nến {symbol} trên khung {interval} chưa đóng, chỉ nhận dữ liệu realtime")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
 async def run_signal_checker(bot):
+    logger.info(f"Bot khởi động với múi giờ: {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     from bot_handler import get_watchlist_from_db, send_formatted_signal
     
@@ -226,6 +232,7 @@ async def run_signal_checker(bot):
                             
                             if m15_data.empty or h1_data.empty:
                                 logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
+                                logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
                                 continue
                             
                             m15_data.set_index('timestamp', inplace=True)
@@ -294,7 +301,7 @@ async def run_signal_checker(bot):
                             logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
                         await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {e}. Reconnect sau 5s...")
+                logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {str(e)}. Reconnect sau 5s...")
                 await asyncio.sleep(5)
     
     # Khởi chạy WebSocket cho tất cả symbol và timeframe
