@@ -10,9 +10,12 @@ from binance import AsyncClient, BinanceSocketManager
 import logging
 
 # Cấu hình logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.handlers[0].setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+handler = logging.StreamHandler()  # Thêm handler mặc định cho console
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 logger.handlers[0].formatter.converter = lambda *args: datetime.now(vietnam_tz).timetuple()
 
 # --- CẤU HÌNH CHỈ BÁO ---
