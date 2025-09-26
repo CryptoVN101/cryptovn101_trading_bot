@@ -36,7 +36,7 @@ vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 active_sockets = {}  # Lưu trữ các socket WebSocket để đóng khi cần
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
-async def get_klines(symbol, interval, limit=1500):
+async def get_klines(symbol, interval, limit=1000):  # Thay đổi limit từ 1500 thành 1000
     client = None
     try:
         client = await AsyncClient.create()
@@ -73,8 +73,7 @@ async def get_klines(symbol, interval, limit=1500):
             await client.close_connection()
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
-def calculate_cvd_divergence(df):
-    global symbol  # Đảm bảo symbol được định nghĩa trong phạm vi hàm
+def calculate_cvd_divergence(df, symbol):  # Thêm tham số symbol để tránh undefined
     logger.info(f"Tính CVD cho {symbol}: {len(df)} nến")
     if len(df) < 50 + FRACTAL_PERIODS:
         logger.warning(f"Không đủ dữ liệu cho {symbol}: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
@@ -181,7 +180,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         df = pd.DataFrame([new_candle])
     else:
         df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
-        df = df.tail(1500)
+        df = df.tail(1000)  # Cập nhật tail thành 1000 để đồng bộ với limit
     
     for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col])
@@ -210,14 +209,25 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
         if not watchlist:
             logger.warning("Watchlist rỗng. Đợi cập nhật watchlist...")
             return
-        for symbol in watchlist:
-            klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
-            m15_data, h1_data = await asyncio.gather(
-                get_klines(symbol, TIMEFRAME_M15),
-                get_klines(symbol, TIMEFRAME_H1)
-            )
-            klines_cache[symbol]['m15'] = m15_data
-            klines_cache[symbol]['h1'] = h1_data
+        # Tải dữ liệu nến theo lô để giảm tải
+        for i in range(0, len(watchlist), 5):  # Xử lý 5 symbol/lần
+            batch = watchlist[i:i+5]
+            tasks = []
+            for symbol in batch:
+                klines_cache[symbol] = {'m15': pd.DataFrame(), 'h1': pd.DataFrame()}
+                tasks.append(get_klines(symbol, TIMEFRAME_M15))
+                tasks.append(get_klines(symbol, TIMEFRAME_H1))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for symbol, (m15_data, h1_data) in zip(batch, zip(results[::2], results[1::2])):
+                if isinstance(m15_data, Exception):
+                    logger.error(f"Lỗi tải M15 cho {symbol}: {m15_data}")
+                else:
+                    klines_cache[symbol]['m15'] = m15_data
+                if isinstance(h1_data, Exception):
+                    logger.error(f"Lỗi tải H1 cho {symbol}: {h1_data}")
+                else:
+                    klines_cache[symbol]['h1'] = h1_data
+            await asyncio.sleep(1)  # Đợi 1 giây giữa các lô
         return watchlist
 
     async def start_websocket(watchlist):
@@ -237,7 +247,7 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
                                     continue
                                 m15_data.set_index('timestamp', inplace=True)
                                 h1_data.set_index('timestamp', inplace=True)
-                                cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index())
+                                cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index(), symbol)
                                 if not cvd_signal_m15:
                                     continue
                                 stoch_m15_series = calculate_stochastic(m15_data)
@@ -265,7 +275,7 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
                                 if final_signal_message:
                                     signal_timestamp = final_signal_message['timestamp']
                                     if last_sent_signals.get(symbol) != signal_timestamp:
-                                        await send_formatted_signal(bot_instance, final_signal_message)  # Sử dụng bot_instance
+                                        await send_formatted_signal(bot_instance, final_signal_message)
                                         last_sent_signals[symbol] = signal_timestamp
                                         logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel")
                                     else:
@@ -279,13 +289,13 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
         for symbol in watchlist:
             tasks.append(handle_kline_socket(symbol, TIMEFRAME_M15))
             tasks.append(handle_kline_socket(symbol, TIMEFRAME_H1))
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     # Khởi chạy
     watchlist = await initialize_watches()
     if watchlist:
         asyncio.create_task(start_websocket(watchlist))
-        asyncio.create_task(watchlist_monitor(bot_instance))  # Truyền bot_instance
+        asyncio.create_task(watchlist_monitor(bot_instance))
     try:
         await asyncio.Event().wait()
     except Exception as e:
@@ -296,12 +306,12 @@ async def run_signal_checker(bot_instance):  # Thêm bot_instance làm tham số
         await client.close_connection()
 
 # --- HÀM ĐỊNH KỲ KIỂM TRA WATCHLIST ---
-async def watchlist_monitor(bot_instance):  # Thêm bot_instance làm tham số
+async def watchlist_monitor(bot_instance):
     while True:
         try:
-            from bot_handler import reload_signal_checker  # Import tại đây để tránh vòng lặp
-            await reload_signal_checker(bot_instance)  # Gọi với bot_instance
-            await asyncio.sleep(60)  # Kiểm tra mỗi 60 giây
+            from bot_handler import reload_signal_checker
+            await reload_signal_checker(bot_instance)
+            await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Lỗi trong watchlist_monitor: {e}")
             await asyncio.sleep(5)
