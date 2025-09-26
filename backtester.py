@@ -43,13 +43,18 @@ def print_signal(signal_data):
     print("==================================================")
 
 # --- HÀM LẤY DỮ LIỆU (TẠM THỜI LẤY TỪ TRADING_LOGIC) ---
-async def get_klines_wrapper(symbol, interval, client, limit=CANDLE_LIMIT):
-    """Wrapper để gọi get_klines từ trading_logic với client."""
+async def get_klines_wrapper(symbol, interval, limit=CANDLE_LIMIT):
+    """Wrapper để gọi get_klines từ trading_logic với client được khởi tạo trong hàm."""
     from trading_logic import get_klines
-    return await get_klines(symbol, interval, client, limit=limit)
+    client = await AsyncClient.create()
+    try:
+        return await get_klines(symbol, interval, client, limit=limit)
+    finally:
+        if client and not client.session.closed:
+            await client.close_connection()
 
 # --- BỘ MÁY BACKTEST ---
-async def run_backtest_logic(client):
+async def run_backtest_logic():
     """
     Chạy logic backtest và trả về một danh sách các tín hiệu hợp lệ.
     """
@@ -58,8 +63,8 @@ async def run_backtest_logic(client):
     for symbol in SYMBOLS_TO_TEST:
         print(f"--- [Backtest] Đang xử lý mã {symbol} ---")
         m15_data, h1_data = await asyncio.gather(
-            get_klines_wrapper(symbol, TIMEFRAME_M15, client),
-            get_klines_wrapper(symbol, TIMEFRAME_H1, client)
+            get_klines_wrapper(symbol, TIMEFRAME_M15),
+            get_klines_wrapper(symbol, TIMEFRAME_H1)
         )
 
         if m15_data.empty or h1_data.empty:
@@ -125,10 +130,10 @@ async def run_backtest_logic(client):
     
     return all_final_signals
 
-async def main(client):
+async def main():
     """Hàm main để chạy backtester từ command line hoặc bot."""
     print("--- Chạy Backtester ở chế độ Standalone ---")
-    signals = await run_backtest_logic(client)
+    signals = await run_backtest_logic()
     for signal in signals:
         print_signal(signal)
     print(f"\n--- Hoàn tất Backtest. Đã tìm thấy tổng cộng {len(signals)} tín hiệu. ---")
@@ -138,7 +143,7 @@ async def run_backtest():
     """Khởi tạo client và chạy backtest."""
     client = await AsyncClient.create()
     try:
-        await main(client)
+        await main()
     finally:
         if client and not client.session.closed:
             await client.close_connection()
