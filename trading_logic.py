@@ -7,10 +7,9 @@ import numpy as np
 import pandas_ta as ta
 from binance.async_client import AsyncClient
 from binance.exceptions import BinanceAPIException
-# <<< SỬA ĐỔI TẠI ĐÂY: Import trực tiếp từ database >>>
 from database import get_watchlist_from_db
 
-# --- CẤU HÌNH (Không đổi) ---
+# --- CẤU HÌNH ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
 TIMEFRAME_H1 = AsyncClient.KLINE_INTERVAL_1HOUR
 FRACTAL_PERIODS = 4
@@ -18,6 +17,9 @@ CVD_PERIOD = 24
 STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
+# <<< THÊM HẰNG SỐ MỚI TẠI ĐÂY >>>
+# Số giây chờ sau khi nến đóng cửa trước khi quét
+SCAN_DELAY_SECONDS = 10 
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU (Không đổi) ---
 async def get_klines(symbol, interval, limit=300):
@@ -69,68 +71,52 @@ def find_cvd_divergence_signals(m15_data: pd.DataFrame):
     # ... (giữ nguyên code của hàm này) ...
     if len(m15_data) < 50 + FRACTAL_PERIODS:
         return []
-
-    # 1. Tính toán các chỉ báo cần thiết
+    # ... (phần còn lại của logic tìm tín hiệu giữ nguyên)
     price_range = m15_data['high'] - m15_data['low']
     m15_data['delta'] = np.where(price_range > 0, m15_data['volume'] * (2 * m15_data['close'] - m15_data['low'] - m15_data['high']) / price_range, 0)
     m15_data['delta'] = m15_data['delta'].fillna(0)
     m15_data['cvd'] = ta.ema(m15_data['delta'], length=CVD_PERIOD)
     m15_data['ema50'] = ta.ema(m15_data['close'], length=50)
-
-    # 2. Tìm các điểm Fractal
     up_fractals, down_fractals = [], []
     n = FRACTAL_PERIODS
     for i in range(n, len(m15_data) - n):
         is_uptrend = m15_data['close'].iloc[i - n] > m15_data['ema50'].iloc[i - n]
         is_downtrend = m15_data['close'].iloc[i - n] < m15_data['ema50'].iloc[i - n]
-        
         is_pivot_high = m15_data['high'].iloc[i] >= m15_data['high'].iloc[i-n:i+n+1].max()
         is_pivot_low = m15_data['low'].iloc[i] <= m15_data['low'].iloc[i-n:i+n+1].min()
-
         if is_pivot_high and is_uptrend: up_fractals.append(i)
         if is_pivot_low and is_downtrend: down_fractals.append(i)
-
-    # 3. Quét tìm phân kỳ
     m15_signals = []
     for i in range(1, len(up_fractals)):
         prev_idx, last_idx = up_fractals[i-1], up_fractals[i]
-        if (last_idx - prev_idx) < 30 and \
-           (m15_data['high'].iloc[last_idx] > m15_data['high'].iloc[prev_idx]) and \
-           (m15_data['cvd'].iloc[last_idx] < m15_data['cvd'].iloc[prev_idx]) and \
-           (m15_data['cvd'].iloc[last_idx] > 0 and m15_data['cvd'].iloc[prev_idx] > 0):
-            m15_signals.append({
-                'type': 'SHORT 📉', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 
-                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'
-            })
+        if (last_idx - prev_idx) < 30 and (m15_data['high'].iloc[last_idx] > m15_data['high'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] < m15_data['cvd'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] > 0 and m15_data['cvd'].iloc[prev_idx] > 0):
+            m15_signals.append({'type': 'SHORT 📉', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'})
     for i in range(1, len(down_fractals)):
         prev_idx, last_idx = down_fractals[i-1], down_fractals[i]
-        if (last_idx - prev_idx) < 30 and \
-           (m15_data['low'].iloc[last_idx] < m15_data['low'].iloc[prev_idx]) and \
-           (m15_data['cvd'].iloc[last_idx] > m15_data['cvd'].iloc[prev_idx]) and \
-           (m15_data['cvd'].iloc[last_idx] < 0 and m15_data['cvd'].iloc[prev_idx] < 0):
-            m15_signals.append({
-                'type': 'LONG 📈', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx],
-                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'
-            })
+        if (last_idx - prev_idx) < 30 and (m15_data['low'].iloc[last_idx] < m15_data['low'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] > m15_data['cvd'].iloc[prev_idx]) and (m15_data['cvd'].iloc[last_idx] < 0 and m15_data['cvd'].iloc[prev_idx] < 0):
+            m15_signals.append({'type': 'LONG 📈', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'})
     return m15_signals
 
 
-# --- BỘ QUÉT TÍN HIỆU LIVE (Không đổi logic, chỉ sửa import) ---
+# --- BỘ QUÉT TÍN HIỆU LIVE ---
 async def run_signal_checker(bot):
-    # <<< SỬA ĐỔI TẠI ĐÂY: Dùng local import để phá vỡ vòng lặp >>>
     from bot_handler import send_formatted_signal
 
     print("🚀 Signal checker is running with updated logic...")
     processed_signals = set()
 
     while True:
-        # ... (giữ nguyên code của vòng lặp while) ...
+        watchlist = await get_watchlist_from_db()
+        print(f"Current watchlist contains {len(watchlist)} symbol(s): {', '.join(watchlist) if watchlist else 'None'}")
+        
         now = datetime.now(pytz.utc)
         next_run_minute = (now.minute // 15 + 1) * 15
+        
+        # <<< THAY ĐỔI Ở ĐÂY: Sử dụng hằng số SCAN_DELAY_SECONDS >>>
         if next_run_minute >= 60:
-            next_run_time = now.replace(minute=0, second=5, microsecond=0) + timedelta(hours=1)
+            next_run_time = now.replace(minute=0, second=SCAN_DELAY_SECONDS, microsecond=0) + timedelta(hours=1)
         else:
-            next_run_time = now.replace(minute=next_run_minute, second=5, microsecond=0)
+            next_run_time = now.replace(minute=next_run_minute, second=SCAN_DELAY_SECONDS, microsecond=0)
         
         sleep_duration = (next_run_time - now).total_seconds()
         
@@ -139,12 +125,15 @@ async def run_signal_checker(bot):
             await asyncio.sleep(sleep_duration)
 
         print(f"\n--- Waking up at {datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%Y-%m-%d %H:%M:%S')} to scan signals ---")
+        
+        # Lấy lại watchlist một lần nữa phòng trường hợp có thay đổi trong lúc bot ngủ
         watchlist = await get_watchlist_from_db()
         if not watchlist:
             print("Watchlist is empty. Will check again on the next cycle.")
             continue
             
         for symbol in watchlist:
+            # ... (giữ nguyên logic quét của vòng lặp for) ...
             print(f"   -> Scanning {symbol}...")
             try:
                 m15_data_raw, h1_data_raw = await asyncio.gather(
@@ -174,7 +163,7 @@ async def run_signal_checker(bot):
                 if signal_id in processed_signals:
                     continue
                 
-                print(f"      🔥 Found a potential signal for {symbol} at {datetime.fromtimestamp(recent_signal['timestamp']/1000).strftime('%H:%M')}")
+                print(f"      🔥 Found a potential signal for {symbol} at {datetime.fromtimestamp(recent_signal['timestamp']/1000, tz=pytz.utc).astimezone(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%H:%M %d-%m-%Y')}")
 
                 m15_data_raw['stoch_k'] = calculate_stochastic(m15_data_raw)
                 h1_data_raw['stoch_k'] = calculate_stochastic(h1_data_raw)
