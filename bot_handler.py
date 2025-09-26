@@ -1,10 +1,9 @@
-# bot_handler.py
 import asyncio
 import os
 from datetime import datetime
 import pytz
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, Application
 from telegram import Bot
 from config import CHANNEL_ID
 from backtester import run_backtest_logic
@@ -13,15 +12,37 @@ from database import (
     add_symbols_to_db, 
     remove_symbols_from_db
 )
+from trading_logic import run_signal_checker  # Import để khởi động lại WebSocket
 
-# --- CÁC HÀM XỬ LÝ LỆNH ---
+# Cấu hình logging
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Khởi tạo bot
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Thay bằng token của bạn
+application = Application.builder().token(BOT_TOKEN).build()
+bot = Bot(BOT_TOKEN)
+
+# Hàm reload watchlist và restart WebSocket
+async def reload_signal_checker(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Bắt đầu reload watchlist...")
+    # Dừng các socket cũ (giả sử trading_logic có active_sockets)
+    # Lưu ý: Cần đảm bảo trading_logic hỗ trợ restart dynamic
+    global watchlist_task
+    if 'watchlist_task' in globals() and not watchlist_task.done():
+        watchlist_task.cancel()
+    watchlist_task = asyncio.create_task(run_signal_checker(context.bot))
+    logger.info("WebSocket đã được khởi động lại với watchlist mới.")
+
+# Handler cho /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await update.message.reply_html(
         rf"Chào {user.mention_html()}, bot tín hiệu đã sẵn sàng!"
     )
 
+# Handler cho /add
 async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text("Ví dụ: /add BTCUSDT ETHUSDT")
@@ -33,9 +54,11 @@ async def add_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if symbols_to_add:
         await add_symbols_to_db(symbols_to_add)
         await update.message.reply_text(f"Đã thêm thành công: {', '.join(symbols_to_add)}")
+        await reload_signal_checker(context)  # Reload watchlist và khởi động WebSocket
     else:
         await update.message.reply_text("Các mã coin này đã có trong danh sách.")
 
+# Handler cho /remove
 async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text("Ví dụ: /remove SOLUSDT")
@@ -51,9 +74,11 @@ async def remove_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not_found_symbols:
             message += f"\nKhông tìm thấy: {', '.join(not_found_symbols)}"
         await update.message.reply_text(message)
+        await reload_signal_checker(context)  # Reload watchlist và khởi động WebSocket
     else:
         await update.message.reply_text("Không tìm thấy các mã coin này trong danh sách.")
 
+# Handler cho /list
 async def list_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     watchlist = await get_watchlist_from_db()
     if not watchlist:
@@ -62,12 +87,17 @@ async def list_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         message = "<b>Danh sách theo dõi:</b>\n\n" + "\n".join([f"• <code>{s}</code>" for s in watchlist])
     await update.message.reply_text(message, parse_mode='HTML')
 
-# --- HÀM GỬI TÍN HIỆU ---
+# Handler cho /restart
+async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Đang khởi động lại bot...")
+    global watchlist_task
+    if 'watchlist_task' in globals() and not watchlist_task.done():
+        watchlist_task.cancel()
+    watchlist_task = asyncio.create_task(run_signal_checker(context.bot))
+    await update.message.reply_text("Bot đã được khởi động lại.")
+
+# Hàm gửi tín hiệu
 async def send_formatted_signal(bot: Bot, signal_data: dict):
-    """
-    Định dạng và gửi tín hiệu cuối cùng lên channel.
-    Bổ sung thêm thông tin Stoch để debug.
-    """
     vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     original_time = datetime.fromtimestamp(signal_data['timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
     confirmation_time = datetime.fromtimestamp(signal_data['confirmation_timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
@@ -75,7 +105,6 @@ async def send_formatted_signal(bot: Bot, signal_data: dict):
     signal_type_text = "Tín hiệu đảo chiều BUY/LONG" if 'LONG' in signal_data['type'] else "Tín hiệu đảo chiều BÁN/SHORT"
     signal_emoji = "🟢" if 'LONG' in signal_data['type'] else "🔴"
     
-    # Lấy giá trị Stoch từ signal_data
     stoch_m15 = signal_data.get('stoch_m15', 0.0)
     stoch_h1 = signal_data.get('stoch_h1', 0.0)
         
@@ -88,15 +117,15 @@ async def send_formatted_signal(bot: Bot, signal_data: dict):
         f"---------------------------------\n"
         f"<i>Thời gian gốc: {original_time.strftime('%H:%M %d-%m-%Y')}</i>\n"
         f"<i>Thời gian xác nhận: {confirmation_time.strftime('%H:%M %d-%m-%Y')}</i>\n"
-        f"<i>Stoch (M15/H1): {stoch_m15:.2f} / {stoch_h1:.2f}</i>" # Thêm dòng Stoch
+        f"<i>Stoch (M15/H1): {stoch_m15:.2f} / {stoch_h1:.2f}</i>"
     )
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode='HTML')
-        print(f"✅ Đã gửi tín hiệu cho {signal_data['symbol']} lên channel.")
+        logger.info(f"✅ Đã gửi tín hiệu cho {signal_data['symbol']} lên channel.")
     except Exception as e:
-        print(f"❌ Gửi tín hiệu thất bại: {e}")
+        logger.error(f"❌ Gửi tín hiệu thất bại: {e}")
 
-# --- LỆNH BACKTEST ---
+# Handler cho /backtest
 async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⏳ Bắt đầu backtest...")
     try:
@@ -110,6 +139,23 @@ async def backtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await asyncio.sleep(1)
         await update.message.reply_text("✅ Backtest hoàn tất.")
     except Exception as e:
-        print(f"Lỗi backtest: {e}")
+        logger.error(f"Lỗi backtest: {e}")
         await update.message.reply_text(f" Rất tiếc, đã có lỗi: {e}")
 
+# Đăng ký các handler
+def main():
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("add", add_symbol))
+    application.add_handler(CommandHandler("remove", remove_symbol))
+    application.add_handler(CommandHandler("list", list_symbols))
+    application.add_handler(CommandHandler("restart", restart_bot))
+    application.add_handler(CommandHandler("backtest", backtest_command))
+
+    # Khởi chạy bot và trading_logic
+    global watchlist_task
+    watchlist_task = asyncio.create_task(run_signal_checker(bot))
+    application.run_polling()
+
+if __name__ == "__main__":
+    from telegram.ext import CommandHandler  # Import tại đây để tránh vòng lặp
+    main()
