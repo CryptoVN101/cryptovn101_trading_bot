@@ -12,7 +12,6 @@ from database import (
     add_symbols_to_db, 
     remove_symbols_from_db
 )
-# Không import run_signal_checker ở đây nữa, main.py sẽ quản lý
 
 # Cấu hình logging
 import logging
@@ -22,20 +21,19 @@ logger = logging.getLogger(__name__)
 
 async def _reload_or_restart_logic(context: ContextTypes.DEFAULT_TYPE):
     """Hàm logic chung để khởi động lại bộ quét tín hiệu."""
-    from trading_logic import run_signal_checker # Import tại đây để tránh phụ thuộc vòng
+    # <<< SỬA ĐỔI QUAN TRỌNG: DÙNG LOCAL IMPORT ĐỂ TRÁNH PHỤ THUỘC VÒNG >>>
+    from trading_logic import run_signal_checker 
     
     logger.info("Bắt đầu reload/restart bộ quét tín hiệu...")
     
-    # Lấy task đang chạy từ context của application
     task = context.application.bot_data.get("watchlist_task")
     if task and not task.done():
         task.cancel()
         try:
-            await task # Đợi task kết thúc hẳn sau khi hủy
+            await task
         except asyncio.CancelledError:
             logger.info("Task cũ đã được hủy thành công.")
 
-    # Tạo lại task mới và lưu lại vào context
     new_task = asyncio.create_task(run_signal_checker(context.bot))
     context.application.bot_data["watchlist_task"] = new_task
     logger.info("Bộ quét tín hiệu đã được khởi động lại với watchlist mới.")

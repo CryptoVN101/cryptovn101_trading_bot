@@ -7,7 +7,8 @@ import numpy as np
 import pandas_ta as ta
 from binance.async_client import AsyncClient
 from binance.exceptions import BinanceAPIException
-from bot_handler import send_formatted_signal, get_watchlist_from_db
+# <<< SỬA ĐỔI TẠI ĐÂY: Import trực tiếp từ database >>>
+from database import get_watchlist_from_db
 
 # --- CẤU HÌNH (Không đổi) ---
 TIMEFRAME_M15 = AsyncClient.KLINE_INTERVAL_15MINUTE
@@ -20,6 +21,7 @@ STOCH_D = 8
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU (Không đổi) ---
 async def get_klines(symbol, interval, limit=300):
+    # ... (giữ nguyên code của hàm này) ...
     client = None
     try:
         client = await AsyncClient.create()
@@ -42,7 +44,6 @@ async def get_klines(symbol, interval, limit=300):
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
         ])
         
-        # Chuyển đổi các cột cần thiết sang dạng số
         numeric_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
         return df
@@ -55,6 +56,7 @@ async def get_klines(symbol, interval, limit=300):
 
 # --- CÁC HÀM TÍNH TOÁN (Không đổi) ---
 def calculate_stochastic(df):
+    # ... (giữ nguyên code của hàm này) ...
     if df.empty: return None
     df_reset = df.reset_index(drop=True) if 'timestamp' in df.index.names else df.copy()
     stoch = df_reset.ta.stoch(k=STOCH_K, d=STOCH_D, smooth_k=STOCH_SMOOTH_K)
@@ -62,12 +64,9 @@ def calculate_stochastic(df):
         return stoch[f'STOCHk_{STOCH_K}_{STOCH_D}_{STOCH_SMOOTH_K}']
     return None
 
-# --- LOGIC "CHUẨN" ĐƯỢC MANG TỪ BACKTESTER SANG ---
+# --- LOGIC "CHUẨN" (Không đổi) ---
 def find_cvd_divergence_signals(m15_data: pd.DataFrame):
-    """
-    Hàm logic cốt lõi, lấy logic từ backtester làm chuẩn.
-    Nhận vào dataframe M15 và trả về một danh sách các tín hiệu thô.
-    """
+    # ... (giữ nguyên code của hàm này) ...
     if len(m15_data) < 50 + FRACTAL_PERIODS:
         return []
 
@@ -78,23 +77,21 @@ def find_cvd_divergence_signals(m15_data: pd.DataFrame):
     m15_data['cvd'] = ta.ema(m15_data['delta'], length=CVD_PERIOD)
     m15_data['ema50'] = ta.ema(m15_data['close'], length=50)
 
-    # 2. Tìm các điểm Fractal (logic chính xác từ backtester)
+    # 2. Tìm các điểm Fractal
     up_fractals, down_fractals = [], []
     n = FRACTAL_PERIODS
     for i in range(n, len(m15_data) - n):
         is_uptrend = m15_data['close'].iloc[i - n] > m15_data['ema50'].iloc[i - n]
         is_downtrend = m15_data['close'].iloc[i - n] < m15_data['ema50'].iloc[i - n]
         
-        # Logic tìm pivot high/low chuẩn từ backtester
         is_pivot_high = m15_data['high'].iloc[i] >= m15_data['high'].iloc[i-n:i+n+1].max()
         is_pivot_low = m15_data['low'].iloc[i] <= m15_data['low'].iloc[i-n:i+n+1].min()
 
         if is_pivot_high and is_uptrend: up_fractals.append(i)
         if is_pivot_low and is_downtrend: down_fractals.append(i)
 
-    # 3. Quét tìm phân kỳ dựa trên danh sách fractals
+    # 3. Quét tìm phân kỳ
     m15_signals = []
-    # Tìm phân kỳ giảm
     for i in range(1, len(up_fractals)):
         prev_idx, last_idx = up_fractals[i-1], up_fractals[i]
         if (last_idx - prev_idx) < 30 and \
@@ -102,14 +99,9 @@ def find_cvd_divergence_signals(m15_data: pd.DataFrame):
            (m15_data['cvd'].iloc[last_idx] < m15_data['cvd'].iloc[prev_idx]) and \
            (m15_data['cvd'].iloc[last_idx] > 0 and m15_data['cvd'].iloc[prev_idx] > 0):
             m15_signals.append({
-                'type': 'SHORT 📉', 
-                'price': m15_data['close'].iloc[last_idx], 
-                'timestamp': m15_data['timestamp'].iloc[last_idx], 
-                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 
-                'confirmation_price': m15_data['close'].iloc[last_idx + n], 
-                'timeframe': 'M15'
+                'type': 'SHORT 📉', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx], 
+                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'
             })
-    # Tìm phân kỳ tăng
     for i in range(1, len(down_fractals)):
         prev_idx, last_idx = down_fractals[i-1], down_fractals[i]
         if (last_idx - prev_idx) < 30 and \
@@ -117,22 +109,22 @@ def find_cvd_divergence_signals(m15_data: pd.DataFrame):
            (m15_data['cvd'].iloc[last_idx] > m15_data['cvd'].iloc[prev_idx]) and \
            (m15_data['cvd'].iloc[last_idx] < 0 and m15_data['cvd'].iloc[prev_idx] < 0):
             m15_signals.append({
-                'type': 'LONG 📈', 
-                'price': m15_data['close'].iloc[last_idx], 
-                'timestamp': m15_data['timestamp'].iloc[last_idx], 
-                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 
-                'confirmation_price': m15_data['close'].iloc[last_idx + n], 
-                'timeframe': 'M15'
+                'type': 'LONG 📈', 'price': m15_data['close'].iloc[last_idx], 'timestamp': m15_data['timestamp'].iloc[last_idx],
+                'confirmation_timestamp': m15_data['timestamp'].iloc[last_idx + n], 'confirmation_price': m15_data['close'].iloc[last_idx + n], 'timeframe': 'M15'
             })
     return m15_signals
 
 
-# --- BỘ QUÉT TÍN HIỆU LIVE ĐƯỢC VIẾT LẠI HOÀN TOÀN ---
+# --- BỘ QUÉT TÍN HIỆU LIVE (Không đổi logic, chỉ sửa import) ---
 async def run_signal_checker(bot):
+    # <<< SỬA ĐỔI TẠI ĐÂY: Dùng local import để phá vỡ vòng lặp >>>
+    from bot_handler import send_formatted_signal
+
     print("🚀 Signal checker is running with updated logic...")
-    processed_signals = set() # Set để lưu các tín hiệu đã xử lý
+    processed_signals = set()
 
     while True:
+        # ... (giữ nguyên code của vòng lặp while) ...
         now = datetime.now(pytz.utc)
         next_run_minute = (now.minute // 15 + 1) * 15
         if next_run_minute >= 60:
@@ -155,7 +147,6 @@ async def run_signal_checker(bot):
         for symbol in watchlist:
             print(f"   -> Scanning {symbol}...")
             try:
-                # Lấy đủ dữ liệu để tính toán
                 m15_data_raw, h1_data_raw = await asyncio.gather(
                     get_klines(symbol, TIMEFRAME_M15, limit=300),
                     get_klines(symbol, TIMEFRAME_H1, limit=300)
@@ -165,30 +156,26 @@ async def run_signal_checker(bot):
                     print(f"      - Data empty for {symbol}, skipping.")
                     continue
 
-                # 1. TÌM TÍN HIỆU THÔ BẰNG LOGIC CHUẨN
                 m15_base_signals = find_cvd_divergence_signals(m15_data_raw.copy())
                 if not m15_base_signals:
                     continue
                 
-                # Chỉ quan tâm đến tín hiệu MỚI NHẤT, vừa hình thành ở cây nến trước
-                last_candle_timestamp = m15_data_raw['timestamp'].iloc[-2] # Nến vừa đóng
+                last_candle_timestamp = m15_data_raw['timestamp'].iloc[-2]
                 recent_signal = None
                 for sig in reversed(m15_base_signals):
                     if sig['timestamp'] == last_candle_timestamp:
                          recent_signal = sig
-                         break # Tìm thấy tín hiệu mới nhất, thoát vòng lặp
+                         break
                 
                 if not recent_signal:
-                    continue # Không có tín hiệu nào ở cây nến vừa rồi
+                    continue
 
-                # Tạo ID duy nhất cho tín hiệu để tránh gửi trùng lặp
                 signal_id = f"{symbol}_{recent_signal['timestamp']}"
                 if signal_id in processed_signals:
-                    continue # Bỏ qua nếu đã xử lý
+                    continue
                 
                 print(f"      🔥 Found a potential signal for {symbol} at {datetime.fromtimestamp(recent_signal['timestamp']/1000).strftime('%H:%M')}")
 
-                # 2. TÍNH TOÁN STOCHASTIC VÀ ÁP DỤNG BỘ LỌC
                 m15_data_raw['stoch_k'] = calculate_stochastic(m15_data_raw)
                 h1_data_raw['stoch_k'] = calculate_stochastic(h1_data_raw)
                 
@@ -201,7 +188,6 @@ async def run_signal_checker(bot):
                 except (KeyError, IndexError):
                     continue
 
-                # 3. KIỂM TRA ĐIỀU KIỆN STOCH VÀ GỬI TÍN HIỆU
                 base_signal = {**recent_signal, 'symbol': symbol, 'stoch_m15': stoch_m15_val, 'stoch_h1': stoch_h1_val}
                 final_signal = None
                 
@@ -214,9 +200,9 @@ async def run_signal_checker(bot):
                 
                 if final_signal:
                     await send_formatted_signal(bot, final_signal)
-                    processed_signals.add(signal_id) # Đánh dấu đã xử lý
+                    processed_signals.add(signal_id)
 
             except Exception as e:
-                print(f"Lỗi không xác định khi xử lý mã {symbol}: {e}")
+                print(f"Lỗi không xác định khi xử lý mã {symbol}: {e}", exc_info=True)
             
-            await asyncio.sleep(2) # Giãn cách giữa các lần quét symbol
+            await asyncio.sleep(2)
