@@ -24,9 +24,10 @@ STOCH_K = 16
 STOCH_SMOOTH_K = 16
 STOCH_D = 8
 
-# Biến global để lưu trữ "trí nhớ" của bot
+# Biến global
 last_sent_signals = {}
-klines_cache = {}  # Lưu trữ dữ liệu nến tạm thời cho mỗi symbol
+klines_cache = {}
+vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
 
 # --- KẾT NỐI VÀ LẤY DỮ LIỆU ---
 async def get_klines(symbol, interval, limit=1500):
@@ -67,9 +68,9 @@ async def get_klines(symbol, interval, limit=1500):
 
 # --- LOGIC TÍNH TOÁN CHỈ BÁO ---
 def calculate_cvd_divergence(df):
-    logger.info(f"Tính CVD cho {len(df)} nến")
+    logger.info(f"Tính CVD cho {symbol}: {len(df)} nến")
     if len(df) < 50 + FRACTAL_PERIODS:
-        logger.warning(f"Không đủ dữ liệu: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
+        logger.warning(f"Không đủ dữ liệu cho {symbol}: {len(df)} nến, cần {50 + FRACTAL_PERIODS}")
         return None
     n = FRACTAL_PERIODS
     price_range = df['high'] - df['low']
@@ -91,7 +92,7 @@ def calculate_cvd_divergence(df):
         if is_pivot_low and is_downtrend:
             down_fractals.append(i)
     
-    logger.info(f"Tìm thấy {len(up_fractals)} fractal đỉnh, {len(down_fractals)} fractal đáy")
+    logger.info(f"{symbol}: Tìm thấy {len(up_fractals)} fractal đỉnh, {len(down_fractals)} fractal đáy")
     current_bar_index = len(df) - 1
     signal = None
     if len(up_fractals) >= 2:
@@ -101,6 +102,7 @@ def calculate_cvd_divergence(df):
             High_Per_Price = df['high'].iloc[prev_pivot_idx]
             High_Last_Hist = df['cvd'].iloc[last_pivot_idx]
             High_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
+            logger.info(f"{symbol}: SHORT check - Price: {High_Last_Price} vs {High_Per_Price}, CVD: {High_Last_Hist} vs {High_Per_Hist}")
             if (High_Last_Price > High_Per_Price) and (High_Last_Hist < High_Per_Hist) and \
                (High_Last_Hist > 0 and High_Per_Hist > 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx], 
@@ -114,6 +116,7 @@ def calculate_cvd_divergence(df):
             Low_Per_Price = df['low'].iloc[prev_pivot_idx]
             Low_Last_Hist = df['cvd'].iloc[last_pivot_idx]
             Low_Per_Hist = df['cvd'].iloc[prev_pivot_idx]
+            logger.info(f"{symbol}: LONG check - Price: {Low_Last_Price} vs {Low_Per_Price}, CVD: {Low_Last_Hist} vs {Low_Per_Hist}")
             if (Low_Last_Price < Low_Per_Price) and (Low_Last_Hist > Low_Per_Hist) and \
                (Low_Last_Hist < 0 and Low_Per_Hist < 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
                 signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 
@@ -121,9 +124,9 @@ def calculate_cvd_divergence(df):
                           'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 
                           'confirmation_price': df['close'].iloc[last_pivot_idx + n]}
     if signal:
-        logger.info(f"Tín hiệu được tạo: {signal}")
+        logger.info(f"{symbol}: Tín hiệu được tạo: {signal}")
     else:
-        logger.info("Không tạo được tín hiệu phân kỳ CVD")
+        logger.info(f"{symbol}: Không tạo được tín hiệu phân kỳ CVD")
     return signal
 
 def calculate_stochastic(df):
@@ -142,7 +145,7 @@ def calculate_stochastic(df):
 
 # --- XỬ LÝ DỮ LIỆU WEBSOCKET ---
 async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
-    logger.info(f"Nhận nến mới cho {symbol} trên khung {interval}")
+    logger.info(f"Nhận nến mới cho {symbol} trên khung {interval} tại {datetime.fromtimestamp(kline['k']['t'] / 1000, vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')}")
     kline_data = kline['k']
     if kline_data['x']:  # Chỉ xử lý khi nến đóng
         new_candle = {
@@ -169,7 +172,7 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
             df = pd.DataFrame([new_candle])
         else:
             df = pd.concat([df, pd.DataFrame([new_candle])], ignore_index=True)
-            df = df.tail(1000)  # Giữ tối đa 1000 nến
+            df = df.tail(1500)  # Giữ tối đa 1500 nến
         
         for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col])
@@ -179,10 +182,11 @@ async def process_kline_data(symbol, interval, kline, m15_data, h1_data):
         else:
             klines_cache[symbol]['h1'] = df
         logger.info(f"Cập nhật cache cho {symbol}: M15={len(klines_cache[symbol]['m15'])}, H1={len(klines_cache[symbol]['h1'])}")
+        logger.info(f"--- Kết thúc xử lý nến cho {symbol} ---")
 
 # --- BỘ MÁY QUÉT TÍN HIỆU LIÊN TỤC ---
 async def run_signal_checker(bot):
-    logger.info("🚀 Signal checker is running with WebSocket...")
+    logger.info(f"🚀 Signal checker is running with WebSocket tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     from bot_handler import get_watchlist_from_db, send_formatted_signal
     
     # Khởi tạo BinanceSocketManager
@@ -208,84 +212,90 @@ async def run_signal_checker(bot):
     
     # Tạo WebSocket cho mỗi symbol và timeframe
     async def handle_kline_socket(symbol, interval):
-        async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
-            while True:
-                try:
-                    kline = await kline_socket.recv()
-                    await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
-                    
-                    # Chỉ kiểm tra tín hiệu khi nến M15 đóng
-                    if interval == TIMEFRAME_M15 and kline['k']['x']:
-                        m15_data = klines_cache[symbol]['m15'].copy()
-                        h1_data = klines_cache[symbol]['h1'].copy()
+        while True:
+            try:
+                async with bsm.kline_futures_socket(symbol=symbol.lower(), interval=interval) as kline_socket:
+                    while True:
+                        kline = await kline_socket.recv()
+                        await process_kline_data(symbol, interval, kline, klines_cache[symbol]['m15'], klines_cache[symbol]['h1'])
                         
-                        if m15_data.empty or h1_data.empty:
-                            logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
-                            continue
-                        
-                        m15_data.set_index('timestamp', inplace=True)
-                        h1_data.set_index('timestamp', inplace=True)
-                        
-                        cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index())
-                        if not cvd_signal_m15:
-                            logger.info(f"Không có tín hiệu CVD cho {symbol}")
-                            continue
-                        
-                        stoch_m15_series = calculate_stochastic(m15_data)
-                        stoch_h1_series = calculate_stochastic(h1_data)
-                        if stoch_m15_series is None or stoch_h1_series is None:
-                            logger.warning(f"Thiếu Stochastic cho {symbol}: M15={stoch_m15_series is None}, H1={stoch_h1_series is None}")
-                            continue
-                        
-                        confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
-                        
-                        try:
-                            stoch_m15 = stoch_m15_series.loc[confirmation_ts]
-                        except KeyError:
-                            stoch_m15_series = stoch_m15_series.sort_index()
-                            stoch_m15 = stoch_m15_series[stoch_m15_series.index <= confirmation_ts].iloc[-1] if not stoch_m15_series[stoch_m15_series.index <= confirmation_ts].empty else None
-                            logger.warning(f"Không tìm thấy timestamp Stochastic M15 {confirmation_ts}, dùng giá trị gần nhất: {stoch_m15}")
-                        
-                        try:
-                            stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
-                            stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
-                        except KeyError:
-                            logger.warning(f"Không tìm thấy timestamp Stochastic H1 {confirmation_ts}")
-                            stoch_h1 = None
-                        
-                        if stoch_m15 is None or stoch_h1 is None:
-                            logger.warning(f"Không có Stochastic hợp lệ cho {symbol}: M15={stoch_m15}, H1={stoch_h1}")
-                            continue
-                        
-                        logger.info(f"Giá trị Stochastic cho {symbol}: M15={stoch_m15}, H1={stoch_h1} tại {confirmation_ts}")
-                        
-                        final_signal_message = None
-                        base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
-                        if cvd_signal_m15['type'] == 'LONG 📈' and stoch_m15 < 20:
-                            if stoch_h1 > 25:
-                                final_signal_message = {**base_signal, 'win_rate': '60%'}
-                            elif stoch_h1 < 25:
-                                final_signal_message = {**base_signal, 'win_rate': '80%'}
-                        elif cvd_signal_m15['type'] == 'SHORT 📉' and stoch_m15 > 80:
-                            if stoch_h1 < 75:
-                                final_signal_message = {**base_signal, 'win_rate': '60%'}
-                            elif stoch_h1 > 75:
-                                final_signal_message = {**base_signal, 'win_rate': '80%'}
-                        
-                        if final_signal_message:
-                            logger.info(f"Tín hiệu cuối cùng cho {symbol}: {final_signal_message}")
-                            signal_timestamp = final_signal_message['timestamp']
-                            if last_sent_signals.get(symbol) != signal_timestamp:
-                                await send_formatted_signal(bot, final_signal_message)
-                                last_sent_signals[symbol] = signal_timestamp
-                                logger.info(f"Đã gửi tín hiệu cho {symbol}")
+                        # Chỉ kiểm tra tín hiệu khi nến M15 đóng
+                        if interval == TIMEFRAME_M15 and kline['k']['x']:
+                            m15_data = klines_cache[symbol]['m15'].copy()
+                            h1_data = klines_cache[symbol]['h1'].copy()
+                            
+                            if m15_data.empty or h1_data.empty:
+                                logger.warning(f"Dữ liệu rỗng cho {symbol}: M15={len(m15_data)}, H1={len(h1_data)}")
+                                continue
+                            
+                            m15_data.set_index('timestamp', inplace=True)
+                            h1_data.set_index('timestamp', inplace=True)
+                            
+                            cvd_signal_m15 = calculate_cvd_divergence(m15_data.copy().reset_index())
+                            if not cvd_signal_m15:
+                                logger.info(f"Không có tín hiệu CVD cho {symbol}")
+                                logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
+                                continue
+                            
+                            stoch_m15_series = calculate_stochastic(m15_data)
+                            stoch_h1_series = calculate_stochastic(h1_data)
+                            if stoch_m15_series is None or stoch_h1_series is None:
+                                logger.warning(f"Thiếu Stochastic cho {symbol}: M15={stoch_m15_series is None}, H1={stoch_h1_series is None}")
+                                logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
+                                continue
+                            
+                            confirmation_ts = pd.to_datetime(cvd_signal_m15['confirmation_timestamp'], unit='ms')
+                            
+                            try:
+                                stoch_m15 = stoch_m15_series.loc[confirmation_ts]
+                            except KeyError:
+                                stoch_m15_series = stoch_m15_series.sort_index()
+                                stoch_m15 = stoch_m15_series[stoch_m15_series.index <= confirmation_ts].iloc[-1] if not stoch_m15_series[stoch_m15_series.index <= confirmation_ts].empty else None
+                                logger.warning(f"Không tìm thấy timestamp Stochastic M15 {confirmation_ts} cho {symbol}, dùng giá trị gần nhất: {stoch_m15}")
+                            
+                            try:
+                                stoch_h1_latest_before = stoch_h1_series[h1_data.index <= confirmation_ts]
+                                stoch_h1 = stoch_h1_latest_before.iloc[-1] if not stoch_h1_latest_before.empty else None
+                            except KeyError:
+                                logger.warning(f"Không tìm thấy timestamp Stochastic H1 {confirmation_ts} cho {symbol}")
+                                stoch_h1 = None
+                            
+                            if stoch_m15 is None or stoch_h1 is None:
+                                logger.warning(f"Không có Stochastic hợp lệ cho {symbol}: M15={stoch_m15}, H1={stoch_h1}")
+                                logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
+                                continue
+                            
+                            logger.info(f"{symbol}: Giá trị Stochastic: M15={stoch_m15}, H1={stoch_h1} tại {confirmation_ts}")
+                            
+                            final_signal_message = None
+                            base_signal = {**cvd_signal_m15, 'symbol': symbol, 'timeframe': 'M15', 'stoch_m15': stoch_m15, 'stoch_h1': stoch_h1}
+                            if cvd_signal_m15['type'] == 'LONG 📈' and stoch_m15 < 20:
+                                if stoch_h1 > 25:
+                                    final_signal_message = {**base_signal, 'win_rate': '60%'}
+                                elif stoch_h1 < 25:
+                                    final_signal_message = {**base_signal, 'win_rate': '80%'}
+                            elif cvd_signal_m15['type'] == 'SHORT 📉' and stoch_m15 > 80:
+                                if stoch_h1 < 75:
+                                    final_signal_message = {**base_signal, 'win_rate': '60%'}
+                                elif stoch_h1 > 75:
+                                    final_signal_message = {**base_signal, 'win_rate': '80%'}
+                            
+                            if final_signal_message:
+                                logger.info(f"Tín hiệu cuối cùng cho {symbol}: {final_signal_message}")
+                                signal_timestamp = final_signal_message['timestamp']
+                                if last_sent_signals.get(symbol) != signal_timestamp:
+                                    await send_formatted_signal(bot, final_signal_message)
+                                    last_sent_signals[symbol] = signal_timestamp
+                                    logger.info(f"✅ Đã gửi tín hiệu cho {symbol} lên channel tại {datetime.now(vietnam_tz).strftime('%Y-%m-%d %H:%M:%S')}")
+                                else:
+                                    logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
                             else:
-                                logger.info(f"Tín hiệu trùng lặp cho {symbol}. Bỏ qua.")
-                        else:
-                            logger.info(f"Không tạo tín hiệu cuối cùng cho {symbol} sau khi kiểm tra Stochastic")
-                except Exception as e:
-                    logger.error(f"Lỗi xử lý WebSocket cho {symbol}: {e}")
-                await asyncio.sleep(1)
+                                logger.info(f"Không tạo tín hiệu cuối cùng cho {symbol} sau khi kiểm tra Stochastic")
+                            logger.info(f"--- Kết thúc xử lý tín hiệu cho {symbol} ---")
+                        await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"WebSocket ngắt kết nối cho {symbol} ({interval}): {e}. Reconnect sau 5s...")
+                await asyncio.sleep(5)
     
     # Khởi chạy WebSocket cho tất cả symbol và timeframe
     tasks = []
