@@ -16,7 +16,7 @@ from trading_logic import (
 )
 
 # --- CẤU HÌNH BACKTEST ---
-SYMBOLS_TO_TEST = ["COWUSDT"] 
+SYMBOLS_TO_TEST = ["ZROUSDT"] 
 CANDLE_LIMIT = 1500
 
 # --- HÀM IN TÍN HIỆU (Không đổi) ---

@@ -19,8 +19,14 @@ STOCH_SMOOTH_K = 16
 STOCH_D = 8
 SCAN_DELAY_SECONDS = 15
 
+# <<< SỬA ĐỔI Ở ĐÂY: Tăng giới hạn dữ liệu để ổn định chỉ báo >>>
+LIVE_CANDLE_LIMIT = 1000
+BACKTEST_CANDLE_LIMIT = 1500
+
+
 # --- CÁC HÀM TIỆN ÍCH (KHÔNG ĐỔI) ---
-async def get_klines(symbol, interval, limit=300):
+async def get_klines(symbol, interval, limit=300): # Mặc định vẫn là 300
+    # ... (giữ nguyên code của hàm này) ...
     client = None
     try:
         client = await AsyncClient.create()
@@ -44,6 +50,7 @@ async def get_klines(symbol, interval, limit=300):
         if client: await client.close_connection()
 
 def calculate_stochastic(df):
+    # ... (giữ nguyên code của hàm này) ...
     if df.empty: return None
     df_reset = df.reset_index(drop=True) if 'timestamp' in df.index.names else df.copy()
     stoch = df_reset.ta.stoch(k=STOCH_K, d=STOCH_D, smooth_k=STOCH_SMOOTH_K)
@@ -51,25 +58,16 @@ def calculate_stochastic(df):
         return stoch[f'STOCHk_{STOCH_K}_{STOCH_D}_{STOCH_SMOOTH_K}']
     return None
 
-# --- LOGIC TÌM TÍN HIỆU CỐT LÕI (PHIÊN BẢN KẾT HỢP TỐT NHẤT) ---
-
-# <<< HÀM MỚI DÀNH RIÊNG CHO BACKTESTER >>>
+# --- LOGIC TÌM TÍN HIỆU (KHÔNG ĐỔI) ---
 def find_all_signals_for_backtest(df: pd.DataFrame):
-    """
-    Hàm này quét TOÀN BỘ dataframe để tìm TẤT CẢ các tín hiệu lịch sử.
-    Dành riêng cho backtester.
-    """
+    # ... (giữ nguyên code của hàm này) ...
     n = FRACTAL_PERIODS
     if len(df) < 50 + n: return []
-    
-    # 1. Tính toán các chỉ báo
     price_range = df['high'] - df['low']
     df['delta'] = np.where(price_range > 0, df['volume'] * (2 * df['close'] - df['low'] - df['high']) / price_range, 0)
     df['delta'] = df['delta'].fillna(0)
     df['cvd'] = ta.ema(df['delta'], length=CVD_PERIOD)
     df['ema50'] = ta.ema(df['close'], length=50)
-
-    # 2. Tìm tất cả các điểm pivot
     up_fractals, down_fractals = [], []
     for i in range(n, len(df) - n):
         is_uptrend = df['close'].iloc[i] > df['ema50'].iloc[i]
@@ -78,32 +76,19 @@ def find_all_signals_for_backtest(df: pd.DataFrame):
         is_pivot_low = df['low'].iloc[i] <= df['low'].iloc[i-n:i+n+1].min()
         if is_pivot_high and is_uptrend: up_fractals.append(i)
         if is_pivot_low and is_downtrend: down_fractals.append(i)
-
-    # 3. Lặp qua TẤT CẢ các cặp pivot để tìm tín hiệu
     all_signals = []
     for i in range(1, len(up_fractals)):
         last_pivot_idx, prev_pivot_idx = up_fractals[i], up_fractals[i-1]
-        if (df['high'].iloc[last_pivot_idx] > df['high'].iloc[prev_pivot_idx]) and \
-           (df['cvd'].iloc[last_pivot_idx] < df['cvd'].iloc[prev_pivot_idx]) and \
-           (df['cvd'].iloc[last_pivot_idx] > 0 and df['cvd'].iloc[prev_pivot_idx] > 0) and \
-           ((last_pivot_idx - prev_pivot_idx) < 30):
+        if (df['high'].iloc[last_pivot_idx] > df['high'].iloc[prev_pivot_idx]) and (df['cvd'].iloc[last_pivot_idx] < df['cvd'].iloc[prev_pivot_idx]) and (df['cvd'].iloc[last_pivot_idx] > 0 and df['cvd'].iloc[prev_pivot_idx] > 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
             all_signals.append({'type': 'SHORT 📉', 'price': df['close'].iloc[last_pivot_idx], 'timestamp': df['timestamp'].iloc[last_pivot_idx], 'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 'confirmation_price': df['close'].iloc[last_pivot_idx + n], 'timeframe': 'M15'})
-
     for i in range(1, len(down_fractals)):
         last_pivot_idx, prev_pivot_idx = down_fractals[i], down_fractals[i-1]
-        if (df['low'].iloc[last_pivot_idx] < df['low'].iloc[prev_pivot_idx]) and \
-           (df['cvd'].iloc[last_pivot_idx] > df['cvd'].iloc[prev_pivot_idx]) and \
-           (df['cvd'].iloc[last_pivot_idx] < 0 and df['cvd'].iloc[prev_pivot_idx] < 0) and \
-           ((last_pivot_idx - prev_pivot_idx) < 30):
+        if (df['low'].iloc[last_pivot_idx] < df['low'].iloc[prev_pivot_idx]) and (df['cvd'].iloc[last_pivot_idx] > df['cvd'].iloc[prev_pivot_idx]) and (df['cvd'].iloc[last_pivot_idx] < 0 and df['cvd'].iloc[prev_pivot_idx] < 0) and ((last_pivot_idx - prev_pivot_idx) < 30):
             all_signals.append({'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 'timestamp': df['timestamp'].iloc[last_pivot_idx], 'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 'confirmation_price': df['close'].iloc[last_pivot_idx + n], 'timeframe': 'M15'})
-            
     return all_signals
 
-# <<< HÀM DÀNH RIÊNG CHO LIVE SCANNER >>>
 def find_latest_confirmed_signal(df: pd.DataFrame):
-    """
-    Hàm này chỉ tìm kiếm tín hiệu được xác nhận ở cây nến vừa đóng cửa.
-    """
+    # ... (giữ nguyên code của hàm này) ...
     n = FRACTAL_PERIODS
     if len(df) < 50 + n: return None
     price_range = df['high'] - df['low']
@@ -132,7 +117,7 @@ def find_latest_confirmed_signal(df: pd.DataFrame):
                 signal = {'type': 'LONG 📈', 'price': df['close'].iloc[last_pivot_idx], 'timestamp': df['timestamp'].iloc[last_pivot_idx], 'confirmation_timestamp': df['timestamp'].iloc[last_pivot_idx + n], 'confirmation_price': df['close'].iloc[last_pivot_idx + n], 'timeframe': 'M15'}
     return signal
 
-# --- BỘ QUÉT TÍN HIỆU LIVE (KHÔNG ĐỔI) ---
+# --- BỘ QUÉT TÍN HIỆU LIVE (SỬA LỖI) ---
 async def run_signal_checker(bot):
     from bot_handler import send_formatted_signal
     print("🚀 Signal checker is running with FINAL combined logic...")
@@ -156,9 +141,10 @@ async def run_signal_checker(bot):
         for symbol in watchlist:
             print(f"   -> Scanning {symbol}...")
             try:
+                # <<< SỬA ĐỔI Ở ĐÂY: Sử dụng hằng số LIVE_CANDLE_LIMIT >>>
                 m15_data_raw, h1_data_raw = await asyncio.gather(
-                    get_klines(symbol, TIMEFRAME_M15, limit=300),
-                    get_klines(symbol, TIMEFRAME_H1, limit=300)
+                    get_klines(symbol, TIMEFRAME_M15, limit=LIVE_CANDLE_LIMIT),
+                    get_klines(symbol, TIMEFRAME_H1, limit=LIVE_CANDLE_LIMIT)
                 )
                 if m15_data_raw.empty or h1_data_raw.empty: continue
                 recent_signal = find_latest_confirmed_signal(m15_data_raw.copy())
