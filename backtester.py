@@ -6,22 +6,21 @@ import pandas as pd
 import numpy as np
 from binance.async_client import AsyncClient
 
-# Import hàm logic chung và các hằng số
+# <<< SỬA ĐỔI IMPORT TẠI ĐÂY >>>
 from trading_logic import (
     calculate_stochastic,
-    find_cvd_divergence_signals, # QUAN TRỌNG: Import hàm logic mới
+    find_all_signals_for_backtest, # Sử dụng hàm mới
     get_klines,
     TIMEFRAME_M15,
     TIMEFRAME_H1
 )
 
 # --- CẤU HÌNH BACKTEST ---
-SYMBOLS_TO_TEST = ["EIGENUSDT"] # Thêm các mã bạn muốn backtest
+SYMBOLS_TO_TEST = ["COWUSDT"] 
 CANDLE_LIMIT = 1500
 
-# --- HÀM IN TÍN HIỆU (Giữ nguyên) ---
+# --- HÀM IN TÍN HIỆU (Không đổi) ---
 def print_signal(signal_data):
-    """In tín hiệu ra terminal với format hiển thị cả giá xác nhận."""
     vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     original_time = datetime.fromtimestamp(signal_data['timestamp'] / 1000, tz=pytz.utc).astimezone(vietnam_tz)
     confirmation_time = datetime.fromtimestamp(signal_data.get('confirmation_timestamp', signal_data['timestamp']) / 1000, tz=pytz.utc).astimezone(vietnam_tz)
@@ -42,7 +41,7 @@ def print_signal(signal_data):
     print(f"    (Debug) Stoch M15: {signal_data.get('stoch_m15', 0):.2f} | Stoch H1: {signal_data.get('stoch_h1', 0):.2f}")
     print("==================================================")
 
-# --- BỘ MÁY BACKTEST (Đơn giản hóa) ---
+# --- BỘ MÁY BACKTEST ---
 async def run_backtest_logic():
     all_final_signals = []
 
@@ -57,14 +56,13 @@ async def run_backtest_logic():
             print(f"--- [Backtest] Dữ liệu trống cho {symbol}, bỏ qua ---")
             continue
 
-        # 1. GỌI HÀM LOGIC CHUNG ĐỂ TÌM TÍN HIỆU THÔ
-        m15_signals = find_cvd_divergence_signals(m15_data.copy())
+        # <<< SỬA ĐỔI GỌI HÀM TẠI ĐÂY >>>
+        m15_signals = find_all_signals_for_backtest(m15_data.copy())
         if not m15_signals:
             continue
             
         print(f"--- [Backtest] Tìm thấy {len(m15_signals)} tín hiệu thô cho {symbol}. Bắt đầu lọc...")
 
-        # 2. TÍNH TOÁN STOCH VÀ ÁP DỤNG BỘ LỌC
         m15_data['stoch_k'] = calculate_stochastic(m15_data)
         h1_data['stoch_k'] = calculate_stochastic(h1_data)
         
@@ -73,8 +71,8 @@ async def run_backtest_logic():
         
         for signal in m15_signals:
             try:
-                stoch_m15_val = m15_data.loc[signal['timestamp'], 'stoch_k']
-                stoch_h1_val = h1_data.loc[h1_data.index <= signal['timestamp'], 'stoch_k'].iloc[-1]
+                stoch_m15_val = m15_data.loc[signal['confirmation_timestamp'], 'stoch_k']
+                stoch_h1_val = h1_data.loc[h1_data.index <= signal['confirmation_timestamp'], 'stoch_k'].iloc[-1]
             except (KeyError, IndexError):
                 continue
 
@@ -92,7 +90,7 @@ async def run_backtest_logic():
     
     return all_final_signals
 
-# --- KHỐI CHẠY CHÍNH (Giữ nguyên) ---
+# --- KHỐI CHẠY CHÍNH (Không đổi) ---
 async def main():
     print("--- Chạy Backtester ở chế độ Standalone ---")
     signals = await run_backtest_logic()
